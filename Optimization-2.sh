@@ -3,12 +3,6 @@
 # 更新系统
 apt update && apt upgrade -y
 
-# 安装XanMod内核
-apt-key adv --keyserver keyserver.ubuntu.com --recv-keys ACCAF35C
-add-apt-repository 'deb http://deb.xanmod.org releases main'
-apt update
-apt install -y linux-xanmod
-
 # 检测是否安装iptables，如果没有则安装
 if ! command -v iptables &> /dev/null; then
     echo "安装 iptables..."
