@@ -35,6 +35,9 @@ cat << EOF > /etc/sysctl.conf
 # 网络调优: 基本
 # 启用 TCP 时间戳
 net.ipv4.tcp_timestamps=1
+# 启用 IPv6 时间戳
+net.ipv6.conf.all.accept_ra=2
+net.ipv6.conf.default.accept_ra=2
 
 # 网络调优: 内核 Backlog 队列和缓存相关
 # 设置默认的发送和接收缓冲区大小
@@ -113,6 +116,21 @@ net.ipv4.conf.default.arp_announce=2
 net.ipv4.conf.lo.arp_announce=2
 net.ipv4.conf.all.arp_announce=2
 
+# IPv6 调优
+# 启用 IPv6
+net.ipv6.conf.all.disable_ipv6=0
+net.ipv6.conf.default.disable_ipv6=0
+net.ipv6.conf.lo.disable_ipv6=0
+# 配置 IPv6 地址的过期时间
+net.ipv6.conf.all.accept_dad=1
+net.ipv6.conf.default.accept_dad=1
+net.ipv6.conf.all.accept_ra=1
+net.ipv6.conf.default.accept_ra=1
+net.ipv6.conf.all.router_solicitations=1
+net.ipv6.conf.default.router_solicitations=1
+net.ipv6.conf.all.max_addresses=16
+net.ipv6.conf.default.max_addresses=16
+
 # 内核调优
 # 系统 Panic 后 1 秒自动重启
 kernel.panic=1
@@ -148,7 +166,6 @@ sysctl -p
 
 # 更新 grub
 update-grub
-
 
 # 调整网络队列处理算法（Qdiscs），优化TCP重传次数
 for interface in $interfaces; do
