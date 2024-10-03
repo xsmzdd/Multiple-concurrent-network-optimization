@@ -10,21 +10,21 @@ if ! command -v iptables &> /dev/null; then
 fi
 
 # 获取所有网络接口的名称
-interfaces=$(ip link show | awk -F': ' '/^[0-9]+: [a-zA-Z0-9]+:/{print $2}')
+interfaces=$(nmcli device status | awk '{print $1}' | grep -v DEVICE)
 
 # 循环遍历每个网络接口
 for interface in $interfaces; do
-    # 使用ip设置环缓冲的大小
+    # 使用nmcli增加环缓冲的大小
     echo "Setting ring buffer size for interface $interface..."
-    sudo ip link set dev $interface txqueuelen 10000
+    sudo nmcli connection modify $interface txqueuelen 10000
 
     # 调优网络设备积压队列以避免数据包丢弃
     echo "Tuning network device backlog for interface $interface..."
-    sudo ip link set dev $interface txqueuelen 10000
+    sudo nmcli connection modify $interface rxqueuelen 10000
 
     # 增加NIC的传输队列长度
     echo "Increasing NIC transmission queue length for interface $interface..."
-    sudo ethtool -L $interface combined 10000
+    sudo nmcli connection modify $interface transmit-hash-policy layer2+3
 done
 
 # 备份原始配置文件
@@ -35,6 +35,9 @@ cat << EOF > /etc/sysctl.conf
 # 网络调优: 基本
 # 启用 TCP 时间戳
 net.ipv4.tcp_timestamps=1
+# 启用 IPv6 时间戳
+net.ipv6.conf.all.accept_ra=2
+net.ipv6.conf.default.accept_ra=2
 
 # 网络调优: 内核 Backlog 队列和缓存相关
 # 设置默认的发送和接收缓冲区大小
@@ -113,6 +116,21 @@ net.ipv4.conf.default.arp_announce=2
 net.ipv4.conf.lo.arp_announce=2
 net.ipv4.conf.all.arp_announce=2
 
+# IPv6 调优
+# 启用 IPv6
+net.ipv6.conf.all.disable_ipv6=0
+net.ipv6.conf.default.disable_ipv6=0
+net.ipv6.conf.lo.disable_ipv6=0
+# 配置 IPv6 地址的过期时间
+net.ipv6.conf.all.accept_dad=1
+net.ipv6.conf.default.accept_dad=1
+net.ipv6.conf.all.accept_ra=1
+net.ipv6.conf.default.accept_ra=1
+net.ipv6.conf.all.router_solicitations=1
+net.ipv6.conf.default.router_solicitations=1
+net.ipv6.conf.all.max_addresses=16
+net.ipv6.conf.default.max_addresses=16
+
 # 内核调优
 # 系统 Panic 后 1 秒自动重启
 kernel.panic=1
@@ -146,6 +164,9 @@ EOF
 # 应用新的内核参数
 sysctl -p
 
+# 更新 grub
+update-grub
+
 # 调整网络队列处理算法（Qdiscs），优化TCP重传次数
 for interface in $interfaces; do
     echo "Tuning network queue disciplines (Qdiscs) and TCP retransmission for interface $interface..."
@@ -168,9 +189,13 @@ for interface in $interfaces; do
     sudo iptables -A PREROUTING -t mangle -p udp -i $interface -j MARK --set-mark 20
 done
 
-# 设置文件描述符限制
+# 设置文件描述符限制脚本
+#!/bin/bash
+
+# 获取内存大小（单位：MB）
 total_memory=$(free -m | awk '/^Mem:/{print $2}')
 
+# 计算文件描述符限制数值
 if [[ $total_memory -eq 512 ]]; then
     limit=4096
 else
@@ -179,8 +204,9 @@ else
     limit=$((4096 * multiplier))
 fi
 
-echo "* hard nofile $limit" | sudo tee -a /etc/security/limits.conf
-echo "* soft nofile $limit" | sudo tee -a /etc/security/limits.conf
+# 设置文件描述符限制
+echo "* hard nofile $limit" >> /etc/security/limits.conf
+echo "* soft nofile $limit" >> /etc/security/limits.conf
 
 echo "文件描述符限制已设置为 $limit"
 
