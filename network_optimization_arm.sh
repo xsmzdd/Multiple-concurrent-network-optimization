@@ -62,10 +62,20 @@ echo "验证 BBR 状态..."
 sysctl net.ipv4.tcp_congestion_control
 lsmod | grep bbr
 
-# 调整网络接口队列（针对 ARM 系统架构）
+# 安装 ethtool（如果未安装）
+if ! command -v ethtool &> /dev/null; then
+    echo "安装 ethtool 工具..."
+    apt update && apt install -y ethtool
+fi
+
+# 调整网络接口队列（适配 ARM 系统架构）
 echo "调整网络接口队列..."
 for iface in $(ls /sys/class/net/ | grep -v lo); do
-    ethtool -L $iface combined 4 || echo "警告：无法调整 $iface 队列（可能受限于 ARM 硬件）"
+    if ethtool -L $iface combined 4 &> /dev/null; then
+        echo "已调整 $iface 队列。"
+    else
+        echo "警告：无法调整 $iface 队列（可能受限于 ARM 硬件）。"
+    fi
 done
 
 # 启用 irqbalance 服务（适配 ARM 架构）
