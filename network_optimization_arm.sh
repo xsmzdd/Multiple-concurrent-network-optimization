@@ -71,7 +71,7 @@ fi
 # 调整网络接口队列（适配 ARM 系统架构）
 echo "调整网络接口队列..."
 for iface in $(ls /sys/class/net/ | grep -v lo); do
-    if ethtool -L $iface combined 4 &> /dev/null; then
+    if ethtool -L $iface combined 4 &> /dev/null || true; then
         echo "已调整 $iface 队列。"
     else
         echo "警告：无法调整 $iface 队列（可能受限于 ARM 硬件）。"
