@@ -6,7 +6,9 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-echo "开始优化网络参数（适用于 Debian/Ubuntu amd64 系统）..."
+# 检测系统架构
+ARCH=$(uname -m)
+echo "检测到系统架构为：$ARCH"
 
 # 修改 sysctl.conf 配置
 echo "备份 /etc/sysctl.conf 文件..."
@@ -28,6 +30,18 @@ net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_no_metrics_save = 1
 net.ipv4.tcp_congestion_control = bbr
+
+# 降低 TCP 重传次数
+net.ipv4.tcp_retries1 = 3
+net.ipv4.tcp_retries2 = 5
+net.ipv4.tcp_syn_retries = 3
+net.ipv4.tcp_synack_retries = 3
+net.ipv4.tcp_fastopen = 3
+
+# 增加 TCP 连接稳定性
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_intvl = 75
+net.ipv4.tcp_keepalive_probes = 9
 
 # IPv6 优化
 net.ipv6.conf.all.accept_ra = 2
@@ -68,39 +82,41 @@ if ! command -v ethtool &> /dev/null; then
     apt update && apt install -y ethtool
 fi
 
-# 调整网络接口队列（适配多核 x86 架构）
-echo "优化网络接口队列..."
+# 根据架构调整网络接口队列
+echo "调整网络接口队列..."
 for iface in $(ls /sys/class/net/ | grep -v lo); do
-    if ethtool -G $iface rx 4096 tx 4096 &> /dev/null; then
-        echo "已优化 $iface 队列参数"
+    if [[ "$ARCH" == "x86_64" || "$ARCH" == "amd64" ]]; then
+        # AMD/x86 架构的优化
+        if ethtool -L $iface combined 8 &> /dev/null || true; then
+            echo "已调整 $iface 队列（AMD/x86 架构）。"
+        else
+            echo "警告：无法调整 $iface 队列（可能受限于硬件）。"
+        fi
+    elif [[ "$ARCH" == "aarch64" || "$ARCH" == "armv7l" || "$ARCH" == "armv8l" ]]; then
+        # ARM 架构的优化
+        if ethtool -L $iface combined 4 &> /dev/null || true; then
+            echo "已调整 $iface 队列（ARM 架构）。"
+        else
+            echo "警告：无法调整 $iface 队列（可能受限于 ARM 硬件）。"
+        fi
     else
-        echo "注意：$iface 队列参数调整失败（请检查驱动支持）"
-    fi
-    
-    # 启用多队列（如果支持）
-    if ethtool -L $iface combined 4 &> /dev/null; then
-        echo "已启用 $iface 多队列"
+        echo "未知架构 $ARCH，跳过队列调整。"
     fi
 done
 
 # 启用 irqbalance 服务
-echo "检查并优化中断请求分配..."
-if ! command -v irqbalance &> /dev/null; then
-    apt install -y irqbalance
-fi
-
-# 针对多核 CPU 优化配置
-sed -i 's/^#ONESHOT=.*/ONESHOT=no/' /etc/default/irqbalance
-systemctl restart irqbalance
+echo "检查并启用 irqbalance 服务..."
+apt update && apt install -y irqbalance
+systemctl enable irqbalance --now
 
 # 优化完成
 echo "网络优化已完成！"
 
 # 提示用户是否需要重启
-read -p "部分优化需要重启生效，是否立即重启？ (y/n): " choice
+read -p "优化已完成，是否需要立即重启系统以应用所有更改？ (y/n): " choice
 if [[ "$choice" == "y" || "$choice" == "Y" ]]; then
     echo "系统即将重启..."
     reboot
 else
-    echo "请稍后手动重启以应用完整优化！"
+    echo "请记得稍后重启系统以应用所有更改！"
 fi
