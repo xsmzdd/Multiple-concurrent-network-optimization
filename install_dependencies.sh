@@ -1,58 +1,38 @@
 #!/bin/bash
 
-# 检测是否为 Debian 11（Bullseye）
-if grep -q "bullseye" /etc/os-release; then
-    echo "检测到 Debian 11（Bullseye），正在修复 APT 源..."
-    
-    # 备份原 sources.list
-    echo "备份原来的 /etc/apt/sources.list..."
-    sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak
+# 定义一个日志函数
+log() {
+    echo "[INFO] $1"
+}
 
-    # 修改 sources.list 以使用 archive.debian.org
-    echo "更新 /etc/apt/sources.list..."
-    echo "deb http://archive.debian.org/debian bullseye main contrib non-free" | sudo tee /etc/apt/sources.list
-    echo "deb http://archive.debian.org/debian-security bullseye-security main contrib non-free" | sudo tee -a /etc/apt/sources.list
-    echo "deb http://archive.debian.org/debian bullseye-updates main contrib non-free" | sudo tee -a /etc/apt/sources.list
+log "开始安装软件包..."
 
-    # 禁用 APT 过期检查
-    echo "APT::Acquire::Check-Valid-Until false;" | sudo tee /etc/apt/apt.conf.d/99no-check-valid-until
+# 安装 sudo
+log "安装 sudo..."
+apt-get install -y sudo
 
-    # 更新 APT
-    sudo apt-get update
-else
-    echo "当前系统不是 Debian 11（Bullseye），跳过 APT 源修复。"
-fi
+# 安装 wget
+log "安装 wget..."
+apt-get install -y wget
 
-# 检查并安装 sudo
-if ! command -v sudo &>/dev/null; then
-    echo "sudo 未安装，正在安装..."
-    apt-get update && apt-get install -y sudo
-else
-    echo "sudo 已安装"
-fi
+# 更新软件包索引
+log "更新软件包索引..."
+sudo apt-get update
 
-# 检查并安装 wget
-if ! command -v wget &>/dev/null; then
-    echo "wget 未安装，正在安装..."
-    apt-get update && apt-get install -y wget
-else
-    echo "wget 已安装"
-fi
+# 安装 build-essential
+log "安装 build-essential..."
+sudo apt-get install -y build-essential
 
-# 检查并安装 yum（在 Debian 上使用 dnf 代替）
-if ! command -v yum &>/dev/null; then
-    echo "yum 未安装，正在安装..."
-    apt-get update && apt-get install -y dnf
-else
-    echo "yum 已安装"
-fi
+# 安装 yum
+log "安装 yum..."
+sudo apt-get install -y yum
 
-# 检查并安装 curl
-if ! command -v curl &>/dev/null; then
-    echo "curl 未安装，正在安装..."
-    apt-get update && apt-get install -y curl
-else
-    echo "curl 已安装"
-fi
+# 安装 curl
+log "安装 curl..."
+sudo apt-get install -y curl
 
-echo "所有必要的软件包已经安装完成，并已修复 Debian 11 APT 源（如果适用）。"
+# 更新和升级系统
+log "更新和升级系统..."
+apt-get update && apt-get upgrade -y && apt-get dist-upgrade -y
+
+log "所有操作已完成！"
