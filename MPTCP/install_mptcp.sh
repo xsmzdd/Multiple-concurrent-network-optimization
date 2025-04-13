@@ -1,11 +1,15 @@
 #!/bin/bash
 
 # MPTCP 内核安装脚本
-# 修改版：使用 --no-check-certificate 跳过SSL验证
+# 版本：自动检测本地deb包
 
 # 下载地址
 LINUX_IMAGE_URL="https://tool.money-taoist.com/MPTCP/linux-image-5.4.243+_5.4.243+-1_amd64.deb"
 LINUX_HEADERS_URL="https://tool.money-taoist.com/MPTCP/linux-headers-5.4.243+_5.4.243+-1_amd64.deb"
+
+# 文件路径
+IMAGE_DEB="/tmp/linux-image-5.4.243+_5.4.243+-1_amd64.deb"
+HEADERS_DEB="/tmp/linux-headers-5.4.243+_5.4.243+-1_amd64.deb"
 
 # 1. 检测系统是否为Debian
 if ! grep -q "Debian" /etc/os-release; then
@@ -13,25 +17,48 @@ if ! grep -q "Debian" /etc/os-release; then
     exit 1
 fi
 
-# 2. 下载文件到/tmp（跳过证书验证）
-echo "正在下载内核文件（跳过SSL验证）..."
-wget --no-check-certificate "$LINUX_IMAGE_URL" -O /tmp/linux-image-5.4.243+_5.4.243+-1_amd64.deb || {
-    echo "下载linux-image失败！请检查网络或URL"
-    exit 1
-}
+# 2. 检查本地是否已有deb包
+need_download=0
+if [[ ! -f "$IMAGE_DEB" ]] || [[ ! -f "$HEADERS_DEB" ]]; then
+    need_download=1
+    echo "检测到缺少deb安装包，准备下载..."
+else
+    echo "检测到本地已存在deb安装包，跳过下载..."
+fi
 
-wget --no-check-certificate "$LINUX_HEADERS_URL" -O /tmp/linux-headers-5.4.243+_5.4.243+-1_amd64.deb || {
-    echo "下载linux-headers失败！请检查网络或URL"
-    exit 1
-}
+# 3. 下载文件（如需）
+if [[ $need_download -eq 1 ]]; then
+    echo "正在下载内核文件（跳过SSL验证）..."
+    wget --no-check-certificate "$LINUX_IMAGE_URL" -O "$IMAGE_DEB" || {
+        echo "下载linux-image失败！请检查网络或URL"
+        exit 1
+    }
 
-# 3. 安装内核
+    wget --no-check-certificate "$LINUX_HEADERS_URL" -O "$HEADERS_DEB" || {
+        echo "下载linux-headers失败！请检查网络或URL"
+        exit 1
+    }
+fi
+
+# 4. 验证deb包完整性
+echo "验证deb包完整性..."
+if ! file "$IMAGE_DEB" | grep -q "Debian binary package"; then
+    echo "错误：linux-image包损坏！"
+    exit 1
+fi
+
+if ! file "$HEADERS_DEB" | grep -q "Debian binary package"; then
+    echo "错误：linux-headers包损坏！"
+    exit 1
+fi
+
+# 5. 安装内核
 echo "正在安装内核..."
 cd /tmp
 sudo apt install -y ./linux-image-5.4.243+_5.4.243+-1_amd64.deb
 sudo apt install -y ./linux-headers-5.4.243+_5.4.243+-1_amd64.deb
 
-# 4. 清理旧内核
+# 6. 清理旧内核
 echo "正在清理旧内核..."
 KEEP_KERNELS=("linux-image-5.4.243+" "linux-headers-5.4.243+")
 
@@ -54,16 +81,16 @@ for kernel in $ALL_KERNELS; do
     fi
 done
 
-# 5. 清理系统
+# 7. 清理系统
 echo "正在清理系统..."
 sudo apt-get update
 sudo apt-get autoremove -y
 
-# 6. 更新GRUB
+# 8. 更新GRUB
 echo "正在更新GRUB配置..."
 sudo update-grub
 
-# 7. 重启系统
+# 9. 重启系统
 echo "MPTCP内核安装完成，系统将在10秒后重启..."
 echo "如果要取消重启，请立即按Ctrl+C！"
 sleep 10
