@@ -17,12 +17,6 @@ if ! grep -q "Debian" /etc/os-release; then
     exit 1
 fi
 
-# 检查并安装file命令
-if ! command -v file &> /dev/null; then
-    echo "正在安装file工具..."
-    sudo apt update && sudo apt install -y file
-fi
-
 # 2. 检查本地是否已有deb包
 need_download=0
 if [[ ! -f "$IMAGE_DEB" ]] || [[ ! -f "$HEADERS_DEB" ]]; then
