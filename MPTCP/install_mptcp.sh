@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # MPTCP 内核安装脚本
-# 功能：检测系统 -> 下载安装包 -> 安装内核 -> 清理旧内核 -> 更新GRUB -> 重启
+# 修改版：使用 --no-check-certificate 跳过SSL验证
 
-# 下载地址（请根据实际情况修改）
-LINUX_IMAGE_URL="http://tool.money-taoist.vip/tool/mptcp/linux-image-5.4.243+_5.4.243+-1_amd64.deb"
-LINUX_HEADERS_URL="http://tool.money-taoist.vip/tool/mptcp/linux-headers-5.4.243+_5.4.243+-1_amd64.deb"
+# 下载地址
+LINUX_IMAGE_URL="https://tool.money-taoist.com/MPTCP/linux-image-5.4.243+_5.4.243+-1_amd64.deb"
+LINUX_HEADERS_URL="https://tool.money-taoist.com/MPTCP/linux-headers-5.4.243+_5.4.243+-1_amd64.deb"
 
 # 1. 检测系统是否为Debian
 if ! grep -q "Debian" /etc/os-release; then
@@ -13,15 +13,15 @@ if ! grep -q "Debian" /etc/os-release; then
     exit 1
 fi
 
-# 2. 下载文件到/tmp
-echo "正在下载内核文件..."
-wget -q "$LINUX_IMAGE_URL" -O /tmp/linux-image-5.4.243+_5.4.243+-1_amd64.deb || {
-    echo "下载linux-image失败！"
+# 2. 下载文件到/tmp（跳过证书验证）
+echo "正在下载内核文件（跳过SSL验证）..."
+wget --no-check-certificate "$LINUX_IMAGE_URL" -O /tmp/linux-image-5.4.243+_5.4.243+-1_amd64.deb || {
+    echo "下载linux-image失败！请检查网络或URL"
     exit 1
 }
 
-wget -q "$LINUX_HEADERS_URL" -O /tmp/linux-headers-5.4.243+_5.4.243+-1_amd64.deb || {
-    echo "下载linux-headers失败！"
+wget --no-check-certificate "$LINUX_HEADERS_URL" -O /tmp/linux-headers-5.4.243+_5.4.243+-1_amd64.deb || {
+    echo "下载linux-headers失败！请检查网络或URL"
     exit 1
 }
 
