@@ -11,9 +11,15 @@ LINUX_HEADERS_URL="https://tool.money-taoist.com/MPTCP/linux-headers-5.4.243+_5.
 IMAGE_DEB="/tmp/linux-image-5.4.243+_5.4.243+-1_amd64.deb"
 HEADERS_DEB="/tmp/linux-headers-5.4.243+_5.4.243+-1_amd64.deb"
 
-# 1. 检测系统是否为Debian
-if ! grep -q "Debian" /etc/os-release; then
-    echo "错误：本脚本仅支持Debian系统！"
+# 0. 检查file命令是否存在
+if ! command -v file >/dev/null 2>&1; then
+    echo "未检测到file命令，正在安装..."
+    sudo apt update && sudo apt install -y file
+fi
+
+# 1. 检测系统是否为Debian或Ubuntu
+if ! grep -Eq "Debian|Ubuntu" /etc/os-release; then
+    echo "错误：本脚本仅支持Debian或Ubuntu系统！"
     exit 1
 fi
 
@@ -74,7 +80,7 @@ for kernel in $ALL_KERNELS; do
             break
         fi
     done
-    
+
     if [ $keep -eq 0 ]; then
         echo "正在删除内核: $kernel"
         sudo apt remove -y --purge "$kernel"
