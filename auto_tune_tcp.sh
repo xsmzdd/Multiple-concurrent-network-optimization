@@ -18,31 +18,6 @@ else
     echo -e "${GREEN}✅ 已安装 jq${RESET}"
 fi
 
-# 检查并安装 dos2unix
-if ! command -v dos2unix >/dev/null 2>&1; then
-    echo -e "${YELLOW}🔧 正在安装 dos2unix...${RESET}"
-    sudo apt update >/dev/null
-    sudo apt install -y dos2unix >/dev/null
-else
-    echo -e "${GREEN}✅ 已安装 dos2unix${RESET}"
-fi
-
-# 修复脚本换行符
-echo -e "${CYAN}🧹 修复脚本换行符格式 (dos2unix)...${RESET}"
-dos2unix "$0" >/dev/null
-
-# 应用所有 sysctl 设置
-echo -e "${CYAN}📆 应用所有 sysctl 配置项...${RESET}"
-sysctl --system
-
-# 重启网络服务
-echo -e "${CYAN}🔁 重启网络服务（networking）...${RESET}"
-if systemctl list-units --type=service | grep -q networking.service; then
-    sudo systemctl restart networking
-else
-    echo -e "${YELLOW}⚠️ 未找到 networking 服务，跳过重启。${RESET}"
-fi
-
 # 将 MiB 转为字节
 mib_to_bytes() {
     echo $(( $1 * 1024 * 1024 ))
