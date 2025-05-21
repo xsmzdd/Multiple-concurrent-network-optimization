@@ -45,12 +45,19 @@ CUR_VAL_MIB=$THEORY_VAL_MIB
 MAX_ATTEMPTS=10
 ATTEMPT=0
 
+# 用于记录测试结果的数组
+declare -a TEST_LOGS=()
+
 while (( ATTEMPT < MAX_ATTEMPTS )); do
     echo -e "\n🧪 第 $((ATTEMPT+1)) 轮测试：缓冲区大小为 ${BLUE}${CUR_VAL_MIB} MiB${RESET}"
     BUFFER_BYTES=$(mib_to_bytes $CUR_VAL_MIB)
 
-    sysctl -w net.ipv4.tcp_wmem="4096 16384 $BUFFER_BYTES" >/dev/null
-    sysctl -w net.ipv4.tcp_rmem="4096 87380 $BUFFER_BYTES" >/dev/null
+    if (( CUR_VAL_MIB <= 0 )); then
+        echo -e "${YELLOW}⚠️ 缓冲区值为 ${CUR_VAL_MIB}，无效但继续测试...${RESET}"
+    fi
+
+    sysctl -w net.ipv4.tcp_wmem="4096 16384 $BUFFER_BYTES" >/dev/null 2>&1
+    sysctl -w net.ipv4.tcp_rmem="4096 87380 $BUFFER_BYTES" >/dev/null 2>&1
 
     RESULT_JSON=$(iperf3 -c "$TARGET_IP" -t 10 --json 2>/dev/null)
 
@@ -69,6 +76,9 @@ while (( ATTEMPT < MAX_ATTEMPTS )); do
 
     SPEED_MBPS=$(( SPEED / 1000000 ))
     echo -e "📊 当前速率：${GREEN}${SPEED_MBPS} Mbit/s${RESET}，重传次数：${YELLOW}${RETRANSMITS}${RESET}"
+
+    # 记录当前测试结果
+    TEST_LOGS+=("${CUR_VAL_MIB}:${SPEED}:${RETRANSMITS}")
 
     if (( RETRANSMITS == 0 )); then
         echo -e "${GREEN}🎯 0 重传，缓冲区上调 1MiB 以保守优化...${RESET}"
@@ -90,6 +100,35 @@ while (( ATTEMPT < MAX_ATTEMPTS )); do
     ((ATTEMPT++))
 done
 
+# 如果未确定最终缓冲区，根据记录选最佳
+if [[ -z "$FINAL_VAL_MIB" ]]; then
+    BEST_SPEED=0
+    BEST_RETRANS=999999999
+    BEST_MIB=0
+
+    for LOG in "${TEST_LOGS[@]}"; do
+        MIB=$(echo "$LOG" | cut -d':' -f1)
+        SPEED=$(echo "$LOG" | cut -d':' -f2)
+        RETR=$(echo "$LOG" | cut -d':' -f3)
+
+        if (( SPEED > BEST_SPEED )) || { (( SPEED == BEST_SPEED )) && (( RETR < BEST_RETRANS )); }; then
+            BEST_SPEED=$SPEED
+            BEST_RETRANS=$RETR
+            BEST_MIB=$MIB
+        fi
+    done
+
+    if (( BEST_MIB > 0 )); then
+        FINAL_VAL_MIB=$BEST_MIB
+        SPEED_MBPS=$(( BEST_SPEED / 1000000 ))
+        RETRANSMITS=$BEST_RETRANS
+        echo -e "\n${YELLOW}⚙️ 自动选择最佳记录：缓冲区 ${BEST_MIB} MiB，速率 ${SPEED_MBPS} Mbps，重传 ${RETRANSMITS}${RESET}"
+    else
+        echo -e "\n${RED}❌ 未能确定最终参数，请手动检查测试结果${RESET}"
+        exit 1
+    fi
+fi
+
 # 写入 sysctl.conf 并生效
 if [[ -n "$FINAL_VAL_MIB" ]]; then
     FINAL_BYTES=$(mib_to_bytes $FINAL_VAL_MIB)
@@ -104,19 +143,13 @@ if [[ -n "$FINAL_VAL_MIB" ]]; then
 
     echo -e "\n${GREEN}✅ 调整完成并已生效！最终缓冲区为 ${FINAL_VAL_MIB} MiB（${FINAL_BYTES} 字节）${RESET}"
 
-    # 再次测速显示最终结果（只提取摘要）
-    echo -e "\n📈 最终 iperf3 测试结果摘要："
-    FINAL_RESULT=$(iperf3 -c "$TARGET_IP" -t 10 --json 2>/dev/null)
-
-    FINAL_SPEED=$(echo "$FINAL_RESULT" | jq '.end.sum_sent.bits_per_second | floor')
-    FINAL_RETRANS=$(echo "$FINAL_RESULT" | jq '.end.sum_sent.retransmits')
-    FINAL_SPEED_MBPS=$(( FINAL_SPEED / 1000000 ))
+    # 再次测速显示最终结果
+    echo -e "\n📈 最终 iperf3 测试结果："
+    iperf3 -c "$TARGET_IP" -t 10 --json | jq
 
     echo -e "\n📋 ${CYAN}测试摘要：${RESET}"
     echo -e "  🎯 最终缓冲区：${FINAL_VAL_MIB} MiB"
     echo -e "  💾 字节值：${FINAL_BYTES}"
-    echo -e "  📡 最后测速速率：${GREEN}${FINAL_SPEED_MBPS} Mbit/s${RESET}"
-    echo -e "  🔁 最后重传次数：${YELLOW}${FINAL_RETRANS}${RESET}"
-else
-    echo -e "\n${RED}❌ 未能确定最终参数，请手动检查测试结果${RESET}"
+    echo -e "  📡 最后测速速率：${SPEED_MBPS} Mbit/s"
+    echo -e "  🔁 最后重传次数：${RETRANSMITS}"
 fi
