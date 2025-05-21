@@ -66,7 +66,7 @@ while (( ATTEMPT < MAX_ATTEMPTS )); do
         exit 1
     fi
 
-    RETRANSMITS=$(echo "$RESULT_JSON" | jq '.end.sum_sent.retransmits')
+    RETRANSMITS=$(echo "$RESULT_JSON" | jq '.end.sum_sent.retransmits // .end.streams[0].sender.retransmits // 0')
     SPEED=$(echo "$RESULT_JSON" | jq '.end.sum_sent.bits_per_second | floor')
 
     if [[ -z "$RETRANSMITS" || "$RETRANSMITS" == "null" ]]; then
