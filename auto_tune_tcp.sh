@@ -40,7 +40,7 @@ mib_to_bytes() {
 read -p "🌐 请输入目标 IP：" TARGET_IP
 echo -e "${CYAN}🚀 将对 ${TARGET_IP} 进行 iperf3 测试并自动调整内核 TCP 缓冲区...${RESET}"
 
-THEORY_VAL_MIB=8
+THEORY_VAL_MIB=10
 CUR_VAL_MIB=$THEORY_VAL_MIB
 MAX_ATTEMPTS=10
 ATTEMPT=0
@@ -89,11 +89,8 @@ while (( ATTEMPT < MAX_ATTEMPTS )); do
         echo -e "${CYAN}✅ 重传次数较低（${RETRANSMITS}），认为当前缓冲区稳定${RESET}"
         FINAL_VAL_MIB=$((CUR_VAL_MIB - 1))
         break
-    elif (( RETRANSMITS > 1000 )); then
-        echo -e "${RED}📉 重传较多（${RETRANSMITS}），缓冲区下调 2MiB${RESET}"
-        CUR_VAL_MIB=$((CUR_VAL_MIB - 2))
     else
-        echo -e "${YELLOW}⚠️ 中度重传（${RETRANSMITS}），缓冲区下调 1MiB${RESET}"
+        echo -e "${YELLOW}⚠️ 重传存在（${RETRANSMITS}），缓冲区下调 1MiB${RESET}"
         CUR_VAL_MIB=$((CUR_VAL_MIB - 1))
     fi
 
