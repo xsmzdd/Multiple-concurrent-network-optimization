@@ -31,6 +31,18 @@ fi
 echo -e "${CYAN}🧹 修复脚本换行符格式 (dos2unix)...${RESET}"
 dos2unix "$0" >/dev/null
 
+# 应用所有 sysctl 设置
+echo -e "${CYAN}📆 应用所有 sysctl 配置项...${RESET}"
+sysctl --system
+
+# 重启网络服务
+echo -e "${CYAN}🔁 重启网络服务（networking）...${RESET}"
+if systemctl list-units --type=service | grep -q networking.service; then
+    sudo systemctl restart networking
+else
+    echo -e "${YELLOW}⚠️ 未找到 networking 服务，跳过重启。${RESET}"
+fi
+
 # 将 MiB 转为字节
 mib_to_bytes() {
     echo $(( $1 * 1024 * 1024 ))
@@ -45,16 +57,11 @@ CUR_VAL_MIB=$THEORY_VAL_MIB
 MAX_ATTEMPTS=10
 ATTEMPT=0
 
-# 用于记录测试结果的数组
 declare -a TEST_LOGS=()
 
 while (( ATTEMPT < MAX_ATTEMPTS )); do
     echo -e "\n🧪 第 $((ATTEMPT+1)) 轮测试：缓冲区大小为 ${BLUE}${CUR_VAL_MIB} MiB${RESET}"
     BUFFER_BYTES=$(mib_to_bytes $CUR_VAL_MIB)
-
-    if (( CUR_VAL_MIB <= 0 )); then
-        echo -e "${YELLOW}⚠️ 缓冲区值为 ${CUR_VAL_MIB}，无效但继续测试...${RESET}"
-    fi
 
     sysctl -w net.ipv4.tcp_wmem="4096 16384 $BUFFER_BYTES" >/dev/null 2>&1
     sysctl -w net.ipv4.tcp_rmem="4096 87380 $BUFFER_BYTES" >/dev/null 2>&1
@@ -67,17 +74,16 @@ while (( ATTEMPT < MAX_ATTEMPTS )); do
     fi
 
     RETRANSMITS=$(echo "$RESULT_JSON" | jq '.end.sum_sent.retransmits // .end.streams[0].sender.retransmits // 0')
-    SPEED=$(echo "$RESULT_JSON" | jq '.end.sum_sent.bits_per_second | floor')
+    SPEED=$(echo "$RESULT_JSON" | jq '.end.sum_sent.bits_per_second // .end.streams[0].sender.bits_per_second // 0 | floor')
 
-    if [[ -z "$RETRANSMITS" || "$RETRANSMITS" == "null" ]]; then
-        echo -e "${YELLOW}⚠️ 无法解析重传次数，跳过调整。${RESET}"
-        break
+    if (( SPEED == 0 )); then
+        echo -e "${RED}❌ 测速失败（速率为 0），可能目标端未启动 iperf3 或网络不通！${RESET}"
+        exit 1
     fi
 
     SPEED_MBPS=$(( SPEED / 1000000 ))
     echo -e "📊 当前速率：${GREEN}${SPEED_MBPS} Mbit/s${RESET}，重传次数：${YELLOW}${RETRANSMITS}${RESET}"
 
-    # 记录当前测试结果
     TEST_LOGS+=("${CUR_VAL_MIB}:${SPEED}:${RETRANSMITS}")
 
     if (( RETRANSMITS == 0 )); then
@@ -97,7 +103,6 @@ while (( ATTEMPT < MAX_ATTEMPTS )); do
     ((ATTEMPT++))
 done
 
-# 如果未确定最终缓冲区，根据记录选最佳
 if [[ -z "$FINAL_VAL_MIB" ]]; then
     BEST_SPEED=0
     BEST_RETRANS=999999999
@@ -126,24 +131,20 @@ if [[ -z "$FINAL_VAL_MIB" ]]; then
     fi
 fi
 
-# 写入 sysctl.conf 并生效
-if [[ -n "$FINAL_VAL_MIB" ]]; then
-    FINAL_BYTES=$(mib_to_bytes $FINAL_VAL_MIB)
-    echo -e "\n🔧 ${CYAN}将稳定值写入 ${BLUE}/etc/sysctl.conf${RESET}："
-    echo -e "  - net.ipv4.tcp_wmem = 4096 16384 ${MAGENTA}${FINAL_BYTES}${RESET}"
-    echo -e "  - net.ipv4.tcp_rmem = 4096 87380 ${MAGENTA}${FINAL_BYTES}${RESET}"
+FINAL_BYTES=$(mib_to_bytes $FINAL_VAL_MIB)
+echo -e "\n🔧 ${CYAN}将稳定值写入 ${BLUE}/etc/sysctl.conf${RESET}："
+echo -e "  - net.ipv4.tcp_wmem = 4096 16384 ${MAGENTA}${FINAL_BYTES}${RESET}"
+echo -e "  - net.ipv4.tcp_rmem = 4096 87380 ${MAGENTA}${FINAL_BYTES}${RESET}"
 
-    echo "net.ipv4.tcp_wmem = 4096 16384 $FINAL_BYTES" >> /etc/sysctl.conf
-    echo "net.ipv4.tcp_rmem = 4096 87380 $FINAL_BYTES" >> /etc/sysctl.conf
+echo "net.ipv4.tcp_wmem = 4096 16384 $FINAL_BYTES" >> /etc/sysctl.conf
+echo "net.ipv4.tcp_rmem = 4096 87380 $FINAL_BYTES" >> /etc/sysctl.conf
 
-    sysctl -p
+sysctl -p
 
-    echo -e "\n${GREEN}✅ 调整完成并已生效！最终缓冲区为 ${FINAL_VAL_MIB} MiB（${FINAL_BYTES} 字节）${RESET}"
+echo -e "\n${GREEN}✅ 调整完成并已生效！最终缓冲区为 ${FINAL_VAL_MIB} MiB（${FINAL_BYTES} 字节）${RESET}"
 
-    echo -e "\n📋 ${CYAN}测试摘要：${RESET}"
-    echo -e "  🎯 最终缓冲区：${FINAL_VAL_MIB} MiB"
-    echo -e "  💾 字节值：${FINAL_BYTES}"
-    echo -e "  📡 最后测速速率：${SPEED_MBPS} Mbit/s"
-    echo -e "  🔁 最后重传次数：${RETRANSMITS}"
-fi
-
+echo -e "\n📋 ${CYAN}测试摘要：${RESET}"
+echo -e "  🌟 最终缓冲区：${FINAL_VAL_MIB} MiB"
+echo -e "  📀 字节值：${FINAL_BYTES}"
+echo -e "  🛁 最后测速速率：${SPEED_MBPS} Mbit/s"
+echo -e "  🔁 最后重传次数：${RETRANSMITS}"
