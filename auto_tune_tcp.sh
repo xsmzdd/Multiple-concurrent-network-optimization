@@ -104,15 +104,19 @@ if [[ -n "$FINAL_VAL_MIB" ]]; then
 
     echo -e "\n${GREEN}✅ 调整完成并已生效！最终缓冲区为 ${FINAL_VAL_MIB} MiB（${FINAL_BYTES} 字节）${RESET}"
 
-    # 再次测速显示最终结果
-    echo -e "\n📈 最终 iperf3 测试结果："
-    iperf3 -c "$TARGET_IP" -t 10 --json | jq
+    # 再次测速显示最终结果（只提取摘要）
+    echo -e "\n📈 最终 iperf3 测试结果摘要："
+    FINAL_RESULT=$(iperf3 -c "$TARGET_IP" -t 10 --json 2>/dev/null)
+
+    FINAL_SPEED=$(echo "$FINAL_RESULT" | jq '.end.sum_sent.bits_per_second | floor')
+    FINAL_RETRANS=$(echo "$FINAL_RESULT" | jq '.end.sum_sent.retransmits')
+    FINAL_SPEED_MBPS=$(( FINAL_SPEED / 1000000 ))
 
     echo -e "\n📋 ${CYAN}测试摘要：${RESET}"
     echo -e "  🎯 最终缓冲区：${FINAL_VAL_MIB} MiB"
     echo -e "  💾 字节值：${FINAL_BYTES}"
-    echo -e "  📡 最后测速速率：${SPEED_MBPS} Mbit/s"
-    echo -e "  🔁 最后重传次数：${RETRANSMITS}"
+    echo -e "  📡 最后测速速率：${GREEN}${FINAL_SPEED_MBPS} Mbit/s${RESET}"
+    echo -e "  🔁 最后重传次数：${YELLOW}${FINAL_RETRANS}${RESET}"
 else
     echo -e "\n${RED}❌ 未能确定最终参数，请手动检查测试结果${RESET}"
 fi
