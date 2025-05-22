@@ -55,7 +55,7 @@ BOTTLENECK_BW=$(( LOCAL_BW < REMOTE_BW ? LOCAL_BW : REMOTE_BW ))
 
 # 测量平均 RTT
 echo -e "${CYAN}🕒 正在测量到 ${TARGET_IP} 的 RTT...${RESET}"
-PING_RESULT=$(ping -c 4 "$TARGET_IP" | awk -F'/' '/^rtt/ {print $5}')
+PING_RESULT=$(ping -c 4 "$TARGET_IP" | tail -1 | awk -F '/' '{print $5}')
 if [[ -z $PING_RESULT ]]; then
     echo -e "${RED}⚠️ 无法获取 RTT，请检查网络连接。${RESET}"
     exit 1
@@ -73,11 +73,17 @@ INITIAL_VAL_MIB=$(( THEORY_VAL_MIB * 10 ))
 if (( INITIAL_VAL_MIB < 1 )); then
     INITIAL_VAL_MIB=1
 fi
-CUR_VAL_MIB=$INITIAL_VAL_MIB
 
 # 测试轮次配置
 MAX_ATTEMPTS=10
 ATTEMPT=0
+
+# 计算递减步长（确保最后一轮为1 MiB）
+if (( INITIAL_VAL_MIB > MAX_ATTEMPTS )); then
+    STEP=$(( (INITIAL_VAL_MIB - 1) / (MAX_ATTEMPTS - 1) ))
+else
+    STEP=1
+fi
 
 declare -a TEST_LOGS=()
 
@@ -86,10 +92,27 @@ echo -e "  - 瓶颈带宽：${BOTTLENECK_BW} Mbps"
 echo -e "  - 平均 RTT：${RTT_MS} ms"
 echo -e "  - 理论缓冲区：${THEORY_VAL_MIB} MiB"
 echo -e "  - 初始测试缓冲区：${INITIAL_VAL_MIB} MiB（理论值 × 10）"
+echo -e "  - 递减步长：${STEP} MiB/轮"
 
 echo -e "\n${CYAN}🚀 开始自动调整 TCP 缓冲区...${RESET}"
-while (( ATTEMPT < MAX_ATTEMPTS )); do
-    echo -e "\n🧪 第 $((ATTEMPT+1)) 轮测试：缓冲区大小为 ${BLUE}${CUR_VAL_MIB} MiB${RESET}"
+
+# 计算每轮缓冲区大小
+BUFFER_SIZES=()
+for (( i=0; i<MAX_ATTEMPTS; i++ )); do
+    if (( i == MAX_ATTEMPTS - 1 )); then
+        # 最后一轮强制为1 MiB
+        BUFFER_SIZES+=(1)
+    else
+        # 其他轮次按步长递减
+        CURRENT=$(( INITIAL_VAL_MIB - i * STEP ))
+        (( CURRENT < 1 )) && CURRENT=1
+        BUFFER_SIZES+=($CURRENT)
+    fi
+done
+
+for CUR_VAL_MIB in "${BUFFER_SIZES[@]}"; do
+    ((ATTEMPT++))
+    echo -e "\n🧪 第 ${ATTEMPT} 轮测试：缓冲区大小为 ${BLUE}${CUR_VAL_MIB} MiB${RESET}"
     BUFFER_BYTES=$(mib_to_bytes $CUR_VAL_MIB)
 
     # 动态设置内核参数
@@ -117,14 +140,6 @@ while (( ATTEMPT < MAX_ATTEMPTS )); do
 
     # 记录测试结果
     TEST_LOGS+=("${CUR_VAL_MIB}:${SPEED}:${RETRANSMITS}")
-
-    # 下一轮缓冲区调整为当前值的 80%（取整）
-    CUR_VAL_MIB=$(echo "$CUR_VAL_MIB * 0.8" | bc | awk '{printf("%d\n", $1)}')
-    if (( CUR_VAL_MIB < 1 )); then
-        CUR_VAL_MIB=1  # 缓冲区最小为 1 MiB
-    fi
-
-    ((ATTEMPT++))
 done
 
 # 自动选择最佳结果（最低重传优先，速率次优）
@@ -146,20 +161,23 @@ for LOG in "${TEST_LOGS[@]}"; do
     RETR=$(echo "$LOG" | cut -d':' -f3)
     
     if (( RETR == MIN_RETRANS )); then
-        CANDIDATES+=("$MIB:$SPEED")
+        CANDIDATES+=("$MIB:$SPEED:$RETR")
     fi
 done
 
 # 第三步：在候选中选择速率最高的
 BEST_SPEED=0
 BEST_MIB=0
+BEST_RETRANS=0
 for CANDIDATE in "${CANDIDATES[@]}"; do
     MIB=$(echo "$CANDIDATE" | cut -d':' -f1)
     SPEED=$(echo "$CANDIDATE" | cut -d':' -f2)
+    RETR=$(echo "$CANDIDATE" | cut -d':' -f3)
     
     if (( SPEED > BEST_SPEED )); then
         BEST_SPEED=$SPEED
         BEST_MIB=$MIB
+        BEST_RETRANS=$RETR
     fi
 done
 
@@ -167,7 +185,7 @@ done
 if (( BEST_MIB > 0 )); then
     FINAL_VAL_MIB=$BEST_MIB
     SPEED_MBPS=$(( BEST_SPEED / 1000000 ))
-    echo -e "\n${YELLOW}⚙️ 自动选择最佳记录：缓冲区 ${BEST_MIB} MiB，速率 ${SPEED_MBPS} Mbps，重传 ${MIN_RETRANS}${RESET}"
+    echo -e "\n${YELLOW}⚙️ 自动选择最佳记录：缓冲区 ${BEST_MIB} MiB，速率 ${SPEED_MBPS} Mbps，重传 ${BEST_RETRANS}${RESET}"
 else
     echo -e "\n${RED}❌ 未能确定最终参数，请手动检查测试结果${RESET}"
     exit 1
@@ -187,7 +205,6 @@ echo "net.ipv4.tcp_wmem = 4096 16384 $FINAL_BYTES" >> /etc/sysctl.conf
 echo "net.ipv4.tcp_rmem = 4096 87380 $FINAL_BYTES" >> /etc/sysctl.conf
 
 sysctl -p
-
 
 # 输出摘要
 echo -e "\n${GREEN}✅ 调整完成并已生效！最终缓冲区为 ${FINAL_VAL_MIB} MiB（${FINAL_BYTES} 字节）${RESET}"
