@@ -53,13 +53,27 @@ done
 # 计算瓶颈带宽
 BOTTLENECK_BW=$(( LOCAL_BW < REMOTE_BW ? LOCAL_BW : REMOTE_BW ))
 
-# 测量平均 RTT
+# 测量平均 RTT（兼容IPv4/IPv6）
 echo -e "${CYAN}🕒 正在测量到 ${TARGET_IP} 的 RTT...${RESET}"
-PING_RESULT=$(ping -c 4 "$TARGET_IP" | tail -1 | awk -F '/' '{print $5}')
-if [[ -z $PING_RESULT ]]; then
-    echo -e "${RED}⚠️ 无法获取 RTT，请检查网络连接。${RESET}"
-    exit 1
+
+# 判断是否为IPv6地址
+if [[ $TARGET_IP == *:* ]]; then
+    PING_CMD="ping6"
+else
+    PING_CMD="ping"
 fi
+
+# 执行ping命令并获取平均RTT
+PING_RESULT=$($PING_CMD -c 4 "$TARGET_IP" 2>/dev/null | tail -1 | awk -F '/' '{print $5}')
+if [[ -z $PING_RESULT ]]; then
+    # 如果失败，尝试用ping -6（某些系统可能没有ping6命令）
+    PING_RESULT=$(ping -6 -c 4 "$TARGET_IP" 2>/dev/null | tail -1 | awk -F '/' '{print $5}')
+    if [[ -z $PING_RESULT ]]; then
+        echo -e "${RED}⚠️ 无法获取 RTT，请检查：\n1. 目标IP是否正确\n2. 网络是否连通\n3. 防火墙是否允许ICMP请求${RESET}"
+        exit 1
+    fi
+fi
+
 RTT_MS=$(printf "%.0f" "$PING_RESULT")
 RTT_S=$(echo "scale=3; $RTT_MS / 1000" | bc)
 
