@@ -9,45 +9,101 @@ CYAN='\e[1;36m'
 MAGENTA='\e[1;35m'
 RESET='\e[0m'
 
-# 检查并安装 jq
-if ! command -v jq >/dev/null 2>&1; then
-    echo -e "${YELLOW}🔧 正在安装 jq...${RESET}"
-    sudo apt update >/dev/null
-    sudo apt install -y jq >/dev/null
-else
-    echo -e "${GREEN}✅ 已安装 jq${RESET}"
-fi
+# 检查并安装 jq 和 bc
+DEPENDENCIES=(jq bc)
+for pkg in "${DEPENDENCIES[@]}"; do
+    if ! command -v "$pkg" >/dev/null 2>&1; then
+        echo -e "${YELLOW}🔧 正在安装 $pkg...${RESET}"
+        sudo apt update >/dev/null
+        sudo apt install -y "$pkg" >/dev/null
+    else
+        echo -e "${GREEN}✅ 已安装 $pkg${RESET}"
+    fi
+done
 
 # 将 MiB 转为字节
 mib_to_bytes() {
     echo $(( $1 * 1024 * 1024 ))
 }
 
+# 输入验证函数
+validate_number() {
+    local input=$1
+    if [[ ! $input =~ ^[0-9]+$ ]] || (( input <= 0 )); then
+        echo -e "${RED}错误：请输入有效的正整数。${RESET}"
+        return 1
+    fi
+    return 0
+}
+
 # 初始配置
 read -p "🌐 请输入目标 IP：" TARGET_IP
-echo -e "${CYAN}🚀 将对 ${TARGET_IP} 进行 iperf3 测试并自动调整内核 TCP 缓冲区...${RESET}"
 
-THEORY_VAL_MIB=10
-CUR_VAL_MIB=$THEORY_VAL_MIB
+# 输入本地和测试端带宽
+while true; do
+    read -p "📡 请输入本地带宽（Mbps）：" LOCAL_BW
+    validate_number "$LOCAL_BW" && break
+done
+
+while true; do
+    read -p "📡 请输入测试端带宽（Mbps）：" REMOTE_BW
+    validate_number "$REMOTE_BW" && break
+done
+
+# 计算瓶颈带宽
+BOTTLENECK_BW=$(( LOCAL_BW < REMOTE_BW ? LOCAL_BW : REMOTE_BW ))
+
+# 测量平均 RTT
+echo -e "${CYAN}🕒 正在测量到 ${TARGET_IP} 的 RTT...${RESET}"
+PING_RESULT=$(ping -c 4 "$TARGET_IP" | tail -1 | awk -F '/' '{print $5}')
+if [[ -z $PING_RESULT ]]; then
+    echo -e "${RED}⚠️ 无法获取 RTT，请检查网络连接。${RESET}"
+    exit 1
+fi
+RTT_MS=$(printf "%.0f" "$PING_RESULT")
+RTT_S=$(echo "scale=3; $RTT_MS / 1000" | bc)
+
+# 计算 BDP（修复单位转换错误）
+BDP_BITS=$(echo "$BOTTLENECK_BW * 1000000 * $RTT_S" | bc)
+BDP_BYTES=$(echo "$BDP_BITS / 8" | bc)
+THEORY_VAL_MIB=$(echo "scale=2; $BDP_BYTES / (1024*1024)" | bc | awk '{printf("%d\n", $1 + 0.5)}')  # 四舍五入
+
+# 设置初始缓冲区为 BDP 的 10 倍（最低1 MiB）
+INITIAL_VAL_MIB=$(( THEORY_VAL_MIB * 10 ))
+if (( INITIAL_VAL_MIB < 1 )); then
+    INITIAL_VAL_MIB=1
+fi
+CUR_VAL_MIB=$INITIAL_VAL_MIB
+
+# 测试轮次配置
 MAX_ATTEMPTS=10
 ATTEMPT=0
 
 declare -a TEST_LOGS=()
 
+echo -e "\n${CYAN}🚀 理论 BDP 计算：${RESET}"
+echo -e "  - 瓶颈带宽：${BOTTLENECK_BW} Mbps"
+echo -e "  - 平均 RTT：${RTT_MS} ms"
+echo -e "  - 理论缓冲区：${THEORY_VAL_MIB} MiB"
+echo -e "  - 初始测试缓冲区：${INITIAL_VAL_MIB} MiB（理论值 × 10）"
+
+echo -e "\n${CYAN}🚀 开始自动调整 TCP 缓冲区...${RESET}"
 while (( ATTEMPT < MAX_ATTEMPTS )); do
     echo -e "\n🧪 第 $((ATTEMPT+1)) 轮测试：缓冲区大小为 ${BLUE}${CUR_VAL_MIB} MiB${RESET}"
     BUFFER_BYTES=$(mib_to_bytes $CUR_VAL_MIB)
 
+    # 动态设置内核参数
     sysctl -w net.ipv4.tcp_wmem="4096 16384 $BUFFER_BYTES" >/dev/null 2>&1
     sysctl -w net.ipv4.tcp_rmem="4096 87380 $BUFFER_BYTES" >/dev/null 2>&1
 
+    # 执行 iperf3 测试
     RESULT_JSON=$(iperf3 -c "$TARGET_IP" -t 10 --json 2>/dev/null)
-
     if [[ -z "$RESULT_JSON" ]]; then
         echo -e "${RED}⚠️ iperf3 测试失败或无返回数据，请检查目标 IP 或服务状态。${RESET}"
         exit 1
     fi
 
+    # 解析结果
     RETRANSMITS=$(echo "$RESULT_JSON" | jq '.end.sum_sent.retransmits // .end.streams[0].sender.retransmits // 0')
     SPEED=$(echo "$RESULT_JSON" | jq '.end.sum_sent.bits_per_second // .end.streams[0].sender.bits_per_second // 0 | floor')
 
@@ -59,54 +115,70 @@ while (( ATTEMPT < MAX_ATTEMPTS )); do
     SPEED_MBPS=$(( SPEED / 1000000 ))
     echo -e "📊 当前速率：${GREEN}${SPEED_MBPS} Mbit/s${RESET}，重传次数：${YELLOW}${RETRANSMITS}${RESET}"
 
+    # 记录测试结果
     TEST_LOGS+=("${CUR_VAL_MIB}:${SPEED}:${RETRANSMITS}")
 
-    if (( RETRANSMITS == 0 )); then
-        echo -e "${GREEN}🎯 0 重传，缓冲区上调 1MiB 以保守优化...${RESET}"
-        CUR_VAL_MIB=$((CUR_VAL_MIB + 1))
-        FINAL_VAL_MIB=$((CUR_VAL_MIB - 1))
-        break
-    elif (( RETRANSMITS <= 100 )); then
-        echo -e "${CYAN}✅ 重传次数较低（${RETRANSMITS}），认为当前缓冲区稳定${RESET}"
-        FINAL_VAL_MIB=$((CUR_VAL_MIB - 1))
-        break
-    else
-        echo -e "${YELLOW}⚠️ 重传存在（${RETRANSMITS}），缓冲区下调 1MiB${RESET}"
-        CUR_VAL_MIB=$((CUR_VAL_MIB - 1))
+    # 下一轮缓冲区调整为当前值的 80%（取整）
+    CUR_VAL_MIB=$(echo "$CUR_VAL_MIB * 0.8" | bc | awk '{printf("%d\n", $1)}')
+    if (( CUR_VAL_MIB < 1 )); then
+        CUR_VAL_MIB=1  # 缓冲区最小为 1 MiB
     fi
 
     ((ATTEMPT++))
 done
 
-if [[ -z "$FINAL_VAL_MIB" ]]; then
-    BEST_SPEED=0
-    BEST_RETRANS=999999999
-    BEST_MIB=0
+# 自动选择最佳结果（最低重传优先，速率次优）
+MIN_RETRANS=999999999
+CANDIDATES=()
 
-    for LOG in "${TEST_LOGS[@]}"; do
-        MIB=$(echo "$LOG" | cut -d':' -f1)
-        SPEED=$(echo "$LOG" | cut -d':' -f2)
-        RETR=$(echo "$LOG" | cut -d':' -f3)
-
-        if (( SPEED > BEST_SPEED )) || { (( SPEED == BEST_SPEED )) && (( RETR < BEST_RETRANS )); }; then
-            BEST_SPEED=$SPEED
-            BEST_RETRANS=$RETR
-            BEST_MIB=$MIB
-        fi
-    done
-
-    if (( BEST_MIB > 0 )); then
-        FINAL_VAL_MIB=$BEST_MIB
-        SPEED_MBPS=$(( BEST_SPEED / 1000000 ))
-        RETRANSMITS=$BEST_RETRANS
-        echo -e "\n${YELLOW}⚙️ 自动选择最佳记录：缓冲区 ${BEST_MIB} MiB，速率 ${SPEED_MBPS} Mbps，重传 ${RETRANSMITS}${RESET}"
-    else
-        echo -e "\n${RED}❌ 未能确定最终参数，请手动检查测试结果${RESET}"
-        exit 1
+# 第一步：找到最小重传次数
+for LOG in "${TEST_LOGS[@]}"; do
+    RETR=$(echo "$LOG" | cut -d':' -f3)
+    if (( RETR < MIN_RETRANS )); then
+        MIN_RETRANS=$RETR
     fi
+done
+
+# 第二步：筛选所有等于最小重传次数的记录
+for LOG in "${TEST_LOGS[@]}"; do
+    MIB=$(echo "$LOG" | cut -d':' -f1)
+    SPEED=$(echo "$LOG" | cut -d':' -f2)
+    RETR=$(echo "$LOG" | cut -d':' -f3)
+    
+    if (( RETR == MIN_RETRANS )); then
+        CANDIDATES+=("$MIB:$SPEED")
+    fi
+done
+
+# 第三步：在候选中选择速率最高的
+BEST_SPEED=0
+BEST_MIB=0
+for CANDIDATE in "${CANDIDATES[@]}"; do
+    MIB=$(echo "$CANDIDATE" | cut -d':' -f1)
+    SPEED=$(echo "$CANDIDATE" | cut -d':' -f2)
+    
+    if (( SPEED > BEST_SPEED )); then
+        BEST_SPEED=$SPEED
+        BEST_MIB=$MIB
+    fi
+done
+
+# 输出结果
+if (( BEST_MIB > 0 )); then
+    FINAL_VAL_MIB=$BEST_MIB
+    SPEED_MBPS=$(( BEST_SPEED / 1000000 ))
+    echo -e "\n${YELLOW}⚙️ 自动选择最佳记录：缓冲区 ${BEST_MIB} MiB，速率 ${SPEED_MBPS} Mbps，重传 ${MIN_RETRANS}${RESET}"
+else
+    echo -e "\n${RED}❌ 未能确定最终参数，请手动检查测试结果${RESET}"
+    exit 1
 fi
 
+# 写入系统配置
 FINAL_BYTES=$(mib_to_bytes $FINAL_VAL_MIB)
+
+# 清空 sysctl.conf
+> /etc/sysctl.conf
+
 echo -e "\n🔧 ${CYAN}将稳定值写入 ${BLUE}/etc/sysctl.conf${RESET}："
 echo -e "  - net.ipv4.tcp_wmem = 4096 16384 ${MAGENTA}${FINAL_BYTES}${RESET}"
 echo -e "  - net.ipv4.tcp_rmem = 4096 87380 ${MAGENTA}${FINAL_BYTES}${RESET}"
@@ -116,10 +188,11 @@ echo "net.ipv4.tcp_rmem = 4096 87380 $FINAL_BYTES" >> /etc/sysctl.conf
 
 sysctl -p
 
-echo -e "\n${GREEN}✅ 调整完成并已生效！最终缓冲区为 ${FINAL_VAL_MIB} MiB（${FINAL_BYTES} 字节）${RESET}"
 
+# 输出摘要
+echo -e "\n${GREEN}✅ 调整完成并已生效！最终缓冲区为 ${FINAL_VAL_MIB} MiB（${FINAL_BYTES} 字节）${RESET}"
 echo -e "\n📋 ${CYAN}测试摘要：${RESET}"
 echo -e "  🌟 最终缓冲区：${FINAL_VAL_MIB} MiB"
 echo -e "  📀 字节值：${FINAL_BYTES}"
-echo -e "  🛁 最后测速速率：${SPEED_MBPS} Mbit/s"
-echo -e "  🔁 最后重传次数：${RETRANSMITS}"
+echo -e "  🛁 最佳测速速率：${SPEED_MBPS} Mbit/s"
+echo -e "  🔁 对应重传次数：${BEST_RETRANS}"
