@@ -55,7 +55,7 @@ BOTTLENECK_BW=$(( LOCAL_BW < REMOTE_BW ? LOCAL_BW : REMOTE_BW ))
 
 # 测量平均 RTT
 echo -e "${CYAN}🕒 正在测量到 ${TARGET_IP} 的 RTT...${RESET}"
-PING_RESULT=$(ping -c 4 "$TARGET_IP" | tail -1 | awk -F '/' '{print $5}')
+PING_RESULT=$(ping -c 4 "$TARGET_IP" | awk -F'/' '/^rtt/ {print $5}')
 if [[ -z $PING_RESULT ]]; then
     echo -e "${RED}⚠️ 无法获取 RTT，请检查网络连接。${RESET}"
     exit 1
