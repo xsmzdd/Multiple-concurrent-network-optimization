@@ -39,6 +39,26 @@ validate_number() {
 # 初始配置
 read -p "🌐 请输入目标 IP：" TARGET_IP
 
+# 规范化 IPv6 地址（确保格式正确）
+if [[ $TARGET_IP == *:* ]]; then
+    # 移除所有空格
+    TARGET_IP=$(echo "$TARGET_IP" | tr -d '[:space:]')
+    
+    # 如果地址以 ":" 开头或结尾，移除它们
+    TARGET_IP=$(echo "$TARGET_IP" | sed 's/^://; s/:$//')
+    
+    # 确保地址格式正确
+    if [[ ! $TARGET_IP =~ ^[0-9a-fA-F:]+$ ]]; then
+        echo -e "${RED}错误：IPv6 地址格式无效：$TARGET_IP${RESET}"
+        exit 1
+    fi
+    
+    # 添加方括号用于显示
+    DISPLAY_IP="[$TARGET_IP]"
+else
+    DISPLAY_IP="$TARGET_IP"
+fi
+
 # 输入本地和测试端带宽
 while true; do
     read -p "📡 请输入本地带宽（Mbps）：" LOCAL_BW
@@ -53,43 +73,69 @@ done
 # 计算瓶颈带宽
 BOTTLENECK_BW=$(( LOCAL_BW < REMOTE_BW ? LOCAL_BW : REMOTE_BW ))
 
-# 测量平均 RTT（兼容IPv4/IPv6）
-echo -e "${CYAN}🕒 正在测量到 ${TARGET_IP} 的 RTT...${RESET}"
+# 测量平均 RTT（完全重写）
+echo -e "${CYAN}🕒 正在测量到 ${DISPLAY_IP} 的 RTT...${RESET}"
 
 # 判断是否为IPv6地址
 if [[ $TARGET_IP == *:* ]]; then
-    PING_CMD="ping6"
+    # 对于IPv6，使用ping6或带-6选项的ping
+    if command -v ping6 >/dev/null; then
+        PING_CMD="ping6"
+    else
+        PING_CMD="ping"
+        PING_ARGS="-6"
+    fi
 else
     PING_CMD="ping"
+    PING_ARGS=""
 fi
 
-# 执行ping命令并获取平均RTT（改进解析逻辑）
-PING_OUTPUT=$($PING_CMD -c 4 "$TARGET_IP" 2>&1)
-PING_RESULT=$(echo "$PING_OUTPUT" | awk -F '/' '/rtt/ {print $5}')
+# 执行ping命令并获取输出
+PING_OUTPUT=$($PING_CMD $PING_ARGS -c 4 "$TARGET_IP" 2>&1)
 
-if [[ -z $PING_RESULT ]]; then
-    # 尝试使用更健壮的解析方式
-    PING_RESULT=$(echo "$PING_OUTPUT" | grep -oP 'rtt min/avg/max/mdev = \K[^/]+')
-    
-    if [[ -z $PING_RESULT ]]; then
-        # 作为最后手段，尝试提取所有数字并计算平均值
-        RTT_VALUES=($(echo "$PING_OUTPUT" | grep -oP 'time=\K[0-9.]+'))
-        if [ ${#RTT_VALUES[@]} -ge 1 ]; then
-            SUM=0
-            for val in "${RTT_VALUES[@]}"; do
-                SUM=$(echo "$SUM + $val" | bc)
-            done
-            PING_RESULT=$(echo "scale=3; $SUM / ${#RTT_VALUES[@]}" | bc)
-        else
-            echo -e "${RED}⚠️ 无法获取 RTT，请检查：\n1. 目标IP是否正确\n2. 网络是否连通\n3. 防火墙是否允许ICMP请求${RESET}"
-            echo -e "Ping 输出：\n$PING_OUTPUT"
-            exit 1
+# 改进的RTT提取逻辑
+RTT_VALUES=()
+if [[ $PING_OUTPUT =~ "rtt min/avg/max/mdev" ]]; then
+    # 提取统计行中的平均值
+    RTT_AVG=$(echo "$PING_OUTPUT" | grep -oP 'rtt min\/avg\/max\/mdev = [\d.]+/[\d.]+/[\d.]+/[\d.]+' | awk -F'/' '{print $5}')
+    RTT_VALUES+=("$RTT_AVG")
+elif [[ $PING_OUTPUT =~ "round-trip min/avg/max" ]]; then
+    # 备用统计行格式
+    RTT_AVG=$(echo "$PING_OUTPUT" | grep -oP 'round-trip min\/avg\/max = [\d.]+/[\d.]+/[\d.]+' | awk -F'/' '{print $4}')
+    RTT_VALUES+=("$RTT_AVG")
+else
+    # 从单个响应行中提取时间值
+    while IFS= read -r line; do
+        if [[ $line =~ time=([0-9.]+) ]]; then
+            RTT_VALUES+=("${BASH_REMATCH[1]}")
         fi
-    fi
+    done <<< "$PING_OUTPUT"
 fi
 
-RTT_MS=$(printf "%.0f" "$PING_RESULT")
-RTT_S=$(echo "scale=3; $RTT_MS / 1000" | bc)
+# 计算平均值
+if [ ${#RTT_VALUES[@]} -ge 1 ]; then
+    SUM=0
+    for val in "${RTT_VALUES[@]}"; do
+        SUM=$(echo "$SUM + $val" | bc)
+    done
+    PING_RESULT=$(echo "scale=3; $SUM / ${#RTT_VALUES[@]}" | bc)
+    
+    # 确保结果有效
+    if [[ ! $PING_RESULT =~ ^[0-9.]+$ ]]; then
+        echo -e "${RED}错误：无法解析有效的 RTT 值${RESET}"
+        echo -e "Ping 输出：\n$PING_OUTPUT"
+        exit 1
+    fi
+    
+    RTT_MS=$(printf "%.0f" "$PING_RESULT")
+    RTT_S=$(echo "scale=3; $RTT_MS / 1000" | bc)
+    
+    echo -e "${GREEN}✅ 成功获取 RTT: ${RTT_MS} ms${RESET}"
+else
+    echo -e "${RED}⚠️ 无法获取 RTT，请检查：\n1. 目标IP是否正确\n2. 网络是否连通\n3. 防火墙是否允许ICMP请求${RESET}"
+    echo -e "Ping 输出：\n$PING_OUTPUT"
+    exit 1
+fi
 
 # 计算 BDP（修复单位转换错误）
 BDP_BITS=$(echo "$BOTTLENECK_BW * 1000000 * $RTT_S" | bc)
