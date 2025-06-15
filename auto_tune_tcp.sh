@@ -100,6 +100,8 @@ else
 fi
 
 declare -a TEST_LOGS=()
+declare -a TEST_SPEEDS=()
+declare -a TEST_RETRANS=()
 
 echo -e "\n${CYAN}🚀 理论 BDP 计算：${RESET}"
 echo -e "  - 瓶颈带宽：${BOTTLENECK_BW} Mbps"
@@ -154,55 +156,71 @@ for CUR_VAL_MIB in "${BUFFER_SIZES[@]}"; do
 
     # 记录测试结果
     TEST_LOGS+=("${CUR_VAL_MIB}:${SPEED}:${RETRANSMITS}")
+    TEST_SPEEDS+=($SPEED)
+    TEST_RETRANS+=($RETRANSMITS)
 done
 
-# 自动选择最佳结果（最低重传优先，速率次优）
-MIN_RETRANS=999999999
-CANDIDATES=()
-
-# 第一步：找到最小重传次数
-for LOG in "${TEST_LOGS[@]}"; do
-    RETR=$(echo "$LOG" | cut -d':' -f3)
-    if (( RETR < MIN_RETRANS )); then
-        MIN_RETRANS=$RETR
-    fi
+# 显示测试结果表格
+echo -e "\n${CYAN}📊 测试结果汇总：${RESET}"
+echo -e "轮次\t缓冲区大小(MiB)\t速率(Mbps)\t重传次数"
+for i in "${!TEST_LOGS[@]}"; do
+    log=${TEST_LOGS[$i]}
+    buffer_mib=$(echo "$log" | cut -d':' -f1)
+    speed=$(echo "$log" | cut -d':' -f2)
+    retransmits=$(echo "$log" | cut -d':' -f3)
+    speed_mbps=$(( speed / 1000000 ))
+    echo -e "$((i+1))\t$buffer_mib\t\t$speed_mbps\t\t$retransmits"
 done
 
-# 第二步：筛选所有等于最小重传次数的记录
-for LOG in "${TEST_LOGS[@]}"; do
-    MIB=$(echo "$LOG" | cut -d':' -f1)
-    SPEED=$(echo "$LOG" | cut -d':' -f2)
-    RETR=$(echo "$LOG" | cut -d':' -f3)
+# 30秒内手动选择
+FINAL_VAL_MIB=0
+USER_CHOICE=0
+echo -e "\n${YELLOW}⏳ 请在30秒内输入选择的轮次（1-10），直接回车则自动选择：${RESET}"
+read -t 30 USER_CHOICE
+
+if [[ -n "$USER_CHOICE" && $USER_CHOICE =~ ^[0-9]+$ && $USER_CHOICE -ge 1 && $USER_CHOICE -le $MAX_ATTEMPTS ]]; then
+    index=$((USER_CHOICE-1))
+    FINAL_VAL_MIB=${BUFFER_SIZES[$index]}
+    SPEED=${TEST_SPEEDS[$index]}
+    RETRANSMITS=${TEST_RETRANS[$index]}
+    SPEED_MBPS=$(( SPEED / 1000000 ))
     
-    if (( RETR == MIN_RETRANS )); then
-        CANDIDATES+=("$MIB:$SPEED:$RETR")
-    fi
-done
-
-# 第三步：在候选中选择速率最高的
-BEST_SPEED=0
-BEST_MIB=0
-BEST_RETRANS=0
-for CANDIDATE in "${CANDIDATES[@]}"; do
-    MIB=$(echo "$CANDIDATE" | cut -d':' -f1)
-    SPEED=$(echo "$CANDIDATE" | cut -d':' -f2)
-    RETR=$(echo "$CANDIDATE" | cut -d':' -f3)
-    
-    if (( SPEED > BEST_SPEED )); then
-        BEST_SPEED=$SPEED
-        BEST_MIB=$MIB
-        BEST_RETRANS=$RETR
-    fi
-done
-
-# 输出结果
-if (( BEST_MIB > 0 )); then
-    FINAL_VAL_MIB=$BEST_MIB
-    SPEED_MBPS=$(( BEST_SPEED / 1000000 ))
-    echo -e "\n${YELLOW}⚙️ 自动选择最佳记录：缓冲区 ${BEST_MIB} MiB，速率 ${SPEED_MBPS} Mbps，重传 ${BEST_RETRANS}${RESET}"
+    echo -e "\n${GREEN}✅ 您选择了第 ${USER_CHOICE} 轮，缓冲区大小为 ${FINAL_VAL_MIB} MiB${RESET}"
+    echo -e "  📊 该轮结果：速率 ${SPEED_MBPS} Mbps，重传 ${RETRANSMITS}"
 else
-    echo -e "\n${RED}❌ 未能确定最终参数，请手动检查测试结果${RESET}"
-    exit 1
+    # 修改后的自动选择逻辑：同时考虑速率和重传次数
+    echo -e "\n${YELLOW}⏰ 30秒已到，自动选择最佳参数...${RESET}"
+    
+    # 创建候选数组
+    declare -a CANDIDATES=()
+    
+    # 收集所有测试结果
+    for i in "${!TEST_SPEEDS[@]}"; do
+        SPEED=${TEST_SPEEDS[$i]}
+        RETRANS=${TEST_RETRANS[$i]}
+        MIB=${BUFFER_SIZES[$i]}
+        # 将结果保存为 "速率:重传:缓冲区大小:轮次" 格式
+        CANDIDATES+=("$SPEED:$RETRANS:$MIB:$((i+1))")
+    done
+    
+    # 根据速率（降序）和重传（升序）排序
+    # 使用 sort 命令：-t':' 指定分隔符，-k1nr 第一列数字降序，-k2n 第二列数字升序
+    IFS=$'\n' SORTED=($(sort -t':' -k1nr -k2n <<<"${CANDIDATES[*]}"))
+    unset IFS
+    
+    # 获取最佳结果
+    if [ ${#SORTED[@]} -gt 0 ]; then
+        BEST=${SORTED[0]}
+        IFS=':' read -r BEST_SPEED BEST_RETRANS BEST_MIB BEST_ROUND <<< "$BEST"
+        SPEED_MBPS=$(( BEST_SPEED / 1000000 ))
+        
+        echo -e "${YELLOW}⚙️ 自动选择最佳记录：第 ${BEST_ROUND} 轮${RESET}"
+        echo -e "${YELLOW}   缓冲区: ${BEST_MIB} MiB, 速率: ${SPEED_MBPS} Mbps, 重传: ${BEST_RETRANS}${RESET}"
+        FINAL_VAL_MIB=$BEST_MIB
+    else
+        echo -e "\n${RED}❌ 未能确定最终参数，请手动检查测试结果${RESET}"
+        exit 1
+    fi
 fi
 
 # 写入系统配置
@@ -225,5 +243,3 @@ echo -e "\n${GREEN}✅ 调整完成并已生效！最终缓冲区为 ${FINAL_VAL
 echo -e "\n📋 ${CYAN}测试摘要：${RESET}"
 echo -e "  🌟 最终缓冲区：${FINAL_VAL_MIB} MiB"
 echo -e "  📀 字节值：${FINAL_BYTES}"
-echo -e "  🛁 最佳测速速率：${SPEED_MBPS} Mbit/s"
-echo -e "  🔁 对应重传次数：${BEST_RETRANS}"
