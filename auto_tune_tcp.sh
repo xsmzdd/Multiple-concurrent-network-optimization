@@ -63,14 +63,28 @@ else
     PING_CMD="ping"
 fi
 
-# 执行ping命令并获取平均RTT
-PING_RESULT=$($PING_CMD -c 4 "$TARGET_IP" 2>/dev/null | tail -1 | awk -F '/' '{print $5}')
+# 执行ping命令并获取平均RTT（改进解析逻辑）
+PING_OUTPUT=$($PING_CMD -c 4 "$TARGET_IP" 2>&1)
+PING_RESULT=$(echo "$PING_OUTPUT" | awk -F '/' '/rtt/ {print $5}')
+
 if [[ -z $PING_RESULT ]]; then
-    # 如果失败，尝试用ping -6（某些系统可能没有ping6命令）
-    PING_RESULT=$(ping -6 -c 4 "$TARGET_IP" 2>/dev/null | tail -1 | awk -F '/' '{print $5}')
+    # 尝试使用更健壮的解析方式
+    PING_RESULT=$(echo "$PING_OUTPUT" | grep -oP 'rtt min/avg/max/mdev = \K[^/]+')
+    
     if [[ -z $PING_RESULT ]]; then
-        echo -e "${RED}⚠️ 无法获取 RTT，请检查：\n1. 目标IP是否正确\n2. 网络是否连通\n3. 防火墙是否允许ICMP请求${RESET}"
-        exit 1
+        # 作为最后手段，尝试提取所有数字并计算平均值
+        RTT_VALUES=($(echo "$PING_OUTPUT" | grep -oP 'time=\K[0-9.]+'))
+        if [ ${#RTT_VALUES[@]} -ge 1 ]; then
+            SUM=0
+            for val in "${RTT_VALUES[@]}"; do
+                SUM=$(echo "$SUM + $val" | bc)
+            done
+            PING_RESULT=$(echo "scale=3; $SUM / ${#RTT_VALUES[@]}" | bc)
+        else
+            echo -e "${RED}⚠️ 无法获取 RTT，请检查：\n1. 目标IP是否正确\n2. 网络是否连通\n3. 防火墙是否允许ICMP请求${RESET}"
+            echo -e "Ping 输出：\n$PING_OUTPUT"
+            exit 1
+        fi
     fi
 fi
 
