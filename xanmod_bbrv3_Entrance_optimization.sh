@@ -14,26 +14,50 @@ if ping6 -c1 -w1 ipv6.google.com &>/dev/null; then
 else
   USE_IPV6=false
   CURL_IP=""
-  APT_OPTS=""
-  echo "⚠️ 未检测到 IPv6，将使用 IPv4 网络"
+  APT_OPTS="-o Acquire::ForceIPv4=true"
+  echo "⚠️ 未检测到 IPv6，将强制使用 IPv4 网络"
 fi
 
 # ========== 0. 安装依赖 ==========
 echo -e "\n🔍 检查并安装必要依赖..."
-apt update $APT_OPTS >/dev/null 2>&1
+if ! apt update $APT_OPTS; then
+  echo "⚠️ apt update 初次失败，尝试检测是否为 GPG 密钥问题..."
+  # 检查是否为 NO_PUBKEY 86F7D09EE734E623 错误
+  if apt update 2>&1 | grep -q "NO_PUBKEY 86F7D09EE734E623"; then
+    echo "🔑 检测到缺失 GPG 密钥，自动尝试修复中..."
+    KEYRING="/usr/share/keyrings/xanmod-archive-keyring.gpg"
+    curl -fsSL https://dl.xanmod.org/gpg.key | gpg --dearmor | tee "$KEYRING" >/dev/null
+    echo "deb [signed-by=$KEYRING] http://deb.xanmod.org releases main" | tee /etc/apt/sources.list.d/xanmod-kernel.list
+    echo "🔄 重新执行 apt update..."
+    if ! apt update $APT_OPTS; then
+      echo "❌ 修复后仍然无法更新，请手动执行以下命令："
+      echo "curl -fsSL https://dl.xanmod.org/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/xanmod-archive-keyring.gpg"
+      echo 'echo "deb [signed-by=/usr/share/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org releases main" | sudo tee /etc/apt/sources.list.d/xanmod-kernel.list'
+      echo "sudo apt update"
+      exit 1
+    fi
+    echo "✅ GPG 修复成功"
+  else
+    echo "❌ apt update 失败，请检查网络连接或源配置"
+    exit 1
+  fi
+fi
 
 MINIMAL_PKGS=("curl" "wget" "gpg" "dirmngr" "iproute2" "ca-certificates")
 MISSING_PKGS=()
 
 for pkg in "${MINIMAL_PKGS[@]}"; do
-    if ! dpkg -l | grep -q " $pkg "; then
+    if ! dpkg -l | grep -q "^ii  $pkg "; then
         MISSING_PKGS+=("$pkg")
     fi
 done
 
 if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
     echo "📦 安装依赖: ${MISSING_PKGS[*]}"
-    apt install -y --no-install-recommends "${MISSING_PKGS[@]}"
+    if ! apt install -y --no-install-recommends "${MISSING_PKGS[@]}"; then
+        echo "❌ 依赖安装失败，请手动执行: sudo apt install ${MISSING_PKGS[*]}"
+        exit 1
+    fi
 else
     echo "✅ 所有依赖已安装"
 fi
@@ -64,30 +88,49 @@ if [ "$IS_XANMOD" -eq 0 ]; then
 
   if [ ! -f "/etc/apt/sources.list.d/xanmod-kernel.list" ]; then
     echo "🔗 添加 XanMod 仓库..."
-    echo 'deb [arch=amd64] http://deb.xanmod.org releases main' > /etc/apt/sources.list.d/xanmod-kernel.list
+    echo "deb [signed-by=/usr/share/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org releases main" > /etc/apt/sources.list.d/xanmod-kernel.list
 
-    echo "🔑 下载 GPG 密钥..."
-    curl $CURL_IP --fail --retry 3 --retry-delay 2 -o /tmp/xanmod.gpg https://dl.xanmod.org/gpg.key
-    gpg --dearmor < /tmp/xanmod.gpg > /etc/apt/trusted.gpg.d/xanmod.gpg
-    rm -f /tmp/xanmod.gpg
-    echo "✅ GPG 密钥导入完成"
+    echo "🔑 下载并导入 GPG 密钥..."
+    # 修复密钥导入问题
+    KEYRING="/usr/share/keyrings/xanmod-archive-keyring.gpg"
+    if ! curl -fsSL https://dl.xanmod.org/gpg.key | gpg --dearmor -o $KEYRING; then
+        echo "⚠️ 直接下载密钥失败，尝试备选方案..."
+        if ! gpg --no-default-keyring --keyring $KEYRING --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 86F7D09EE734E623; then
+            echo "❌ 无法导入 GPG 密钥，请手动下载："
+            echo "   sudo curl -fsSL https://dl.xanmod.org/gpg.key | gpg --dearmor -o $KEYRING"
+            exit 1
+        fi
+    fi
+    echo "✅ GPG 密钥已成功导入"
+    
+    echo "🔄 更新源..."
+    if ! apt update $APT_OPTS; then
+        echo "❌ 更新源失败，请检查错误信息"
+        exit 1
+    fi
   fi
-
-  echo "🔄 更新源..."
-  apt update $APT_OPTS >/dev/null
 
   echo "⬇️ 安装内核..."
   if apt install -y --no-install-recommends linux-image-$KERNEL_VERSION; then
     echo "✅ 内核安装成功"
   else
     echo "❌ 内核安装失败，尝试下载 DEB 包..."
-    apt download linux-image-$KERNEL_VERSION
-    dpkg -i linux-image-*.deb
-    rm -f linux-image-*.deb
+    TEMP_DIR=$(mktemp -d)
+    cd "$TEMP_DIR"
+    wget $(curl -s https://api.github.com/repos/xanmod/linux/releases | grep browser_download_url | grep $KERNEL_VERSION | grep amd64.deb | head -1 | cut -d '"' -f 4)
+    dpkg -i linux-image-*.deb || {
+      echo "❌ DEB 包安装失败，请手动安装"
+      exit 1
+    }
+    rm -rf "$TEMP_DIR"
   fi
 
   echo "📌 设置默认启动新内核..."
-  grub-set-default 0 || echo "⚠️ grub-set-default 命令未找到"
+  if command -v grub-set-default >/dev/null; then
+    grub-set-default 0
+  else
+    echo "⚠️ grub-set-default 命令未找到，请手动设置启动项"
+  fi
 fi
 
 # ========== 4. 网络优化参数 ==========
@@ -204,7 +247,7 @@ sysctl -p >/dev/null 2>&1 || true
 if [ "$IS_XANMOD" -eq 0 ]; then
   echo -e "\n✅ 配置完成，请重启以启用新内核和设置"
   read -p "🔁 是否立即重启？[Y/n] " ans
-  [[ "$ans" != "n" && "$ans" != "N" ]] && reboot
+  [[ -z "$ans" || "$ans" =~ ^[Yy]$ ]] && reboot
 else
   echo -e "\n✅ 优化已完成，当前运行 XanMod $KERNEL_VERSION"
   echo -e "📊 状态检查："
