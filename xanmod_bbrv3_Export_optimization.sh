@@ -71,7 +71,7 @@ if [ "$IS_XANMOD" -eq 0 ]; then
   
   # 下载并安装GPG密钥
   echo "🔑 下载XanMod GPG密钥..."
-  if ! wget -qO - https://dl.xanmod.org/gpg.key | gpg --dearmor -o /usr/share/keyrings/xanmod-kernel.gpg 2>/dev/null; then
+  if ! wget -qO - https://dl.xanmod.org/gpg.key | gpg --dearmor | tee /usr/share/keyrings/xanmod-kernel.gpg >/dev/null 2>/dev/null; then
     echo "⚠️ 主GPG密钥下载失败，尝试备用源..."
     wget -qO - https://raw.githubusercontent.com/xanmod/kernel/main/gpg.key | gpg --dearmor -o /usr/share/keyrings/xanmod-kernel.gpg 2>/dev/null
   fi
