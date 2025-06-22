@@ -67,12 +67,10 @@ if [ "$IS_XANMOD" -eq 0 ]; then
     echo 'deb [arch=amd64] http://deb.xanmod.org releases main' > /etc/apt/sources.list.d/xanmod-kernel.list
 
     echo "🔑 下载 GPG 密钥..."
-    if curl $CURL_IP --fail --retry 3 --retry-delay 2 https://dl.xanmod.org/gpg.key | gpg --dearmor -o /etc/apt/trusted.gpg.d/xanmod.gpg; then
-      echo "✅ GPG 密钥导入完成"
-    else
-      echo "❌ GPG 密钥导入失败，请检查网络或更换源"
-      exit 1
-    fi
+    curl $CURL_IP --fail --retry 3 --retry-delay 2 -o /tmp/xanmod.gpg https://dl.xanmod.org/gpg.key
+    gpg --dearmor < /tmp/xanmod.gpg > /etc/apt/trusted.gpg.d/xanmod.gpg
+    rm -f /tmp/xanmod.gpg
+    echo "✅ GPG 密钥导入完成"
   fi
 
   echo "🔄 更新源..."
@@ -83,13 +81,9 @@ if [ "$IS_XANMOD" -eq 0 ]; then
     echo "✅ 内核安装成功"
   else
     echo "❌ 内核安装失败，尝试下载 DEB 包..."
-    if apt download linux-image-$KERNEL_VERSION && dpkg -i linux-image-*.deb; then
-      echo "✅ DEB 安装成功"
-      rm -f linux-image-*.deb
-    else
-      echo "❌ DEB 安装也失败，终止执行"
-      exit 1
-    fi
+    apt download linux-image-$KERNEL_VERSION
+    dpkg -i linux-image-*.deb
+    rm -f linux-image-*.deb
   fi
 
   echo "📌 设置默认启动新内核..."
