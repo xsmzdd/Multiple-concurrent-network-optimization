@@ -160,23 +160,27 @@ echo "IPv6 支持: $([ "$HAS_IPV6" -eq 1 ] && echo "✅" || echo "❌")"
 IPV4_LATENCY=""
 IPV6_LATENCY=""
 
-if [ "$HAS_IPV4" -eq 1 ]; then
+if [ -t 0 ]; then
   read -p "🔢 请输入 IPv4 网络延迟 (单位：毫秒): " IPV4_LATENCY
-  # 验证输入
-  if ! [[ $IPV4_LATENCY =~ ^[0-9]+$ ]] || [ $IPV4_LATENCY -lt 1 ] || [ $IPV4_LATENCY -gt 1000 ]; then
-      echo "⚠️ 输入无效，使用默认值 100ms"
-      IPV4_LATENCY=100
-  fi
-  echo "📝 IPv4 延迟设置: ${IPV4_LATENCY}ms"
 fi
 
-if [ "$HAS_IPV6" -eq 1 ]; then
+# 验证输入
+if ! [[ "$IPV4_LATENCY" =~ ^[0-9]+$ ]] || [ "$IPV4_LATENCY" -lt 1 ] || [ "$IPV4_LATENCY" -gt 1000 ]; then
+    echo "⚠️ 输入无效或未输入，使用默认值 100ms"
+    IPV4_LATENCY=100
+fi
+echo "📝 IPv4 延迟设置: ${IPV4_LATENCY}ms"
+fi
+
+if [ -t 0 ]; then
   read -p "🔢 请输入 IPv6 网络延迟 (单位：毫秒): " IPV6_LATENCY
-  if ! [[ $IPV6_LATENCY =~ ^[0-9]+$ ]] || [ $IPV6_LATENCY -lt 1 ] || [ $IPV6_LATENCY -gt 1000 ]; then
-      echo "⚠️ 输入无效，使用默认值 100ms"
-      IPV6_LATENCY=100
-  fi
-  echo "📝 IPv6 延迟设置: ${IPV6_LATENCY}ms"
+fi
+
+if ! [[ "$IPV6_LATENCY" =~ ^[0-9]+$ ]] || [ "$IPV6_LATENCY" -lt 1 ] || [ "$IPV6_LATENCY" -gt 1000 ]; then
+    echo "⚠️ 输入无效或未输入，使用默认值 100ms"
+    IPV6_LATENCY=100
+fi
+echo "📝 IPv6 延迟设置: ${IPV6_LATENCY}ms"
 fi
 
 # ========== 8. 延迟优化方案 ==========
