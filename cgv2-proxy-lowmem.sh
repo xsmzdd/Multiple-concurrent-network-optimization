@@ -74,6 +74,16 @@ try_enable_cgroup_v2() {
 }
 
 ensure_swap() {
+    # 参考 oneclickvirt/incus swap.sh 的设置方式：
+    # 1. 检测 OpenVZ
+    # 2. 固定使用 /swapfile
+    # 3. 使用 fallocate 创建 swapfile
+    # 4. 写入 /etc/fstab: /swapfile none swap defaults 0 0
+
+    if [[ -d "/proc/vz" ]]; then
+        die "检测到 OpenVZ 环境，不支持自行创建 swap。"
+    fi
+
     if swapon --show | awk 'NR>1 {found=1} END {exit !found}'; then
         log "检测到系统已有 swap："
         swapon --show
@@ -82,52 +92,36 @@ ensure_swap() {
 
     log "未检测到 swap。"
     echo
-    read -rp "请输入要创建的 swap 大小，例如 1G、2G、4096M: " SWAP_SIZE
+    read -rp "请输入要创建的 swap 大小，单位 MB，例如 2048 表示 2G: " swapsize
 
-    if [[ -z "${SWAP_SIZE}" ]]; then
+    if [[ -z "${swapsize}" ]]; then
         die "swap 大小不能为空。"
     fi
 
-    if [[ ! "${SWAP_SIZE}" =~ ^[0-9]+[MmGg]$ ]]; then
-        die "swap 大小格式不正确，请使用例如 1G、2G、4096M。"
+    if [[ ! "${swapsize}" =~ ^[0-9]+$ ]]; then
+        die "请输入纯数字，单位为 MB，例如：1024、2048、4096。"
     fi
 
-    local swapfile="/swapfile"
-
-    if [[ -e "${swapfile}" ]]; then
-        local ts
-        ts="$(date +%s)"
-        swapfile="/swapfile-${ts}"
+    if grep -q "swapfile" /etc/fstab; then
+        die "/etc/fstab 中已存在 swapfile 配置。请先检查或删除旧 swapfile 配置后重试。"
     fi
 
-    log "创建 swap 文件：${swapfile}，大小：${SWAP_SIZE}"
-
-    if command -v fallocate >/dev/null 2>&1; then
-        fallocate -l "${SWAP_SIZE}" "${swapfile}" || dd if=/dev/zero of="${swapfile}" bs=1M count="$(
-            echo "${SWAP_SIZE}" | awk '
-                /[Gg]$/ {gsub(/[Gg]/,""); print $1*1024}
-                /[Mm]$/ {gsub(/[Mm]/,""); print $1}
-            '
-        )" status=progress
-    else
-        dd if=/dev/zero of="${swapfile}" bs=1M count="$(
-            echo "${SWAP_SIZE}" | awk '
-                /[Gg]$/ {gsub(/[Gg]/,""); print $1*1024}
-                /[Mm]$/ {gsub(/[Mm]/,""); print $1}
-            '
-        )" status=progress
+    if [[ -e /swapfile ]]; then
+        die "/swapfile 已存在。请先确认是否可删除：rm -f /swapfile"
     fi
 
-    chmod 600 "${swapfile}"
-    mkswap "${swapfile}"
-    swapon "${swapfile}"
+    log "swapfile 未发现，正在创建 /swapfile，大小：${swapsize}M"
 
-    if ! grep -qE "^[[:space:]]*${swapfile}[[:space:]]+" /etc/fstab; then
-        echo "${swapfile} none swap sw 0 0" >> /etc/fstab
-    fi
+    fallocate -l "${swapsize}M" /swapfile
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
 
-    log "swap 已启用："
-    swapon --show
+    echo '/swapfile none swap defaults 0 0' >> /etc/fstab
+
+    log "swap 创建成功："
+    cat /proc/swaps
+    cat /proc/meminfo | grep Swap
 }
 
 enable_memory_controller() {
@@ -148,6 +142,7 @@ setup_cgroup() {
     fi
 
     log "设置 cgroup：${CGROUP_PATH}"
+
     echo "${MEMORY_HIGH}" > "${CGROUP_PATH}/memory.high"
     echo "${MEMORY_MAX}" > "${CGROUP_PATH}/memory.max"
 
@@ -303,6 +298,12 @@ show_status() {
     log "查看 cgroup 内存状态："
     echo "cat ${CGROUP_PATH}/memory.current"
     echo "cat ${CGROUP_PATH}/memory.stat"
+
+    echo
+    log "查看 cgroup 内存限制："
+    echo "cat ${CGROUP_PATH}/memory.high"
+    echo "cat ${CGROUP_PATH}/memory.max"
+    echo "cat ${CGROUP_PATH}/memory.swap.max"
 }
 
 main() {
