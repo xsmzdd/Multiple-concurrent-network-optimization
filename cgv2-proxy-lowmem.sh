@@ -73,108 +73,6 @@ try_enable_cgroup_v2() {
     exit 0
 }
 
-ensure_swap() {
-    if [[ -d "/proc/vz" ]]; then
-        die "检测到 OpenVZ 环境，不支持自行创建 swap。"
-    fi
-
-    # 当前已经启用 swap，直接返回
-    if swapon --show | awk 'NR>1 {found=1} END {exit !found}'; then
-        log "检测到系统已有启用中的 swap："
-        swapon --show
-        return
-    fi
-
-    # 当前没有启用 swap，但 /etc/fstab 里已有 swap 配置，先尝试 swapon -a
-    if grep -qE '^[^#].*[[:space:]]swap[[:space:]]' /etc/fstab; then
-        log "检测到 /etc/fstab 中已有 swap 配置，但当前未启用。正在尝试 swapon -a..."
-
-        if swapon -a 2>/tmp/cgv2-swapon-error.log; then
-            if swapon --show | awk 'NR>1 {found=1} END {exit !found}'; then
-                log "已有 swap 配置已成功启用："
-                swapon --show
-                return
-            fi
-        fi
-
-        log "已有 swap 配置启用失败，错误信息如下："
-        cat /tmp/cgv2-swapon-error.log || true
-
-        log "将继续创建新的 /swapfile。"
-    fi
-
-    log "未检测到已启用的 swap。"
-    echo
-    read -rp "请输入要创建的 swap 大小，单位 MB，例如 2048 表示 2G: " swapsize
-
-    if [[ -z "${swapsize}" ]]; then
-        die "swap 大小不能为空。"
-    fi
-
-    if [[ ! "${swapsize}" =~ ^[0-9]+$ ]]; then
-        die "请输入纯数字，单位为 MB，例如：1024、2048、4096。"
-    fi
-
-    # 如果 /swapfile 已存在，优先尝试启用
-    if [[ -e /swapfile ]]; then
-        log "检测到 /swapfile 已存在，但当前未启用。正在尝试启用已有 /swapfile..."
-
-        chmod 600 /swapfile || true
-
-        if swapon /swapfile 2>/tmp/cgv2-swapon-error.log; then
-            grep -qE '^/swapfile[[:space:]]+' /etc/fstab || echo '/swapfile none swap defaults 0 0' >> /etc/fstab
-            log "/swapfile 已成功启用："
-            swapon --show
-            return
-        fi
-
-        log "已有 /swapfile 启用失败，错误信息如下："
-        cat /tmp/cgv2-swapon-error.log || true
-
-        log "删除无效的 /swapfile 并重新创建。"
-        rm -f /swapfile
-        sed -i '\#^/swapfile[[:space:]]#d' /etc/fstab
-    fi
-
-    log "正在创建 /swapfile，大小：${swapsize}M"
-
-    if command -v fallocate >/dev/null 2>&1; then
-        fallocate -l "${swapsize}M" /swapfile
-    else
-        dd if=/dev/zero of=/swapfile bs=1M count="${swapsize}" status=progress
-    fi
-
-    chmod 600 /swapfile
-    mkswap /swapfile
-
-    # 有些机器 fallocate 创建的 swapfile 无法 swapon，失败后自动改用 dd
-    if ! swapon /swapfile 2>/tmp/cgv2-swapon-error.log; then
-        log "fallocate 创建的 swapfile 启用失败，尝试改用 dd 重新创建..."
-
-        cat /tmp/cgv2-swapon-error.log || true
-
-        rm -f /swapfile
-        dd if=/dev/zero of=/swapfile bs=1M count="${swapsize}" status=progress
-        chmod 600 /swapfile
-        mkswap /swapfile
-
-        if ! swapon /swapfile 2>/tmp/cgv2-swapon-error.log; then
-            log "dd 创建的 swapfile 仍然启用失败，错误信息如下："
-            cat /tmp/cgv2-swapon-error.log || true
-            rm -f /swapfile
-            die "当前系统可能不支持 swapfile，可能是 OpenVZ/LXC/Docker/overlay 文件系统限制。"
-        fi
-    fi
-
-    if ! grep -qE '^/swapfile[[:space:]]+' /etc/fstab; then
-        echo '/swapfile none swap defaults 0 0' >> /etc/fstab
-    fi
-
-    log "swap 创建成功："
-    swapon --show
-    cat /proc/meminfo | grep Swap
-}
-
 enable_memory_controller() {
     if [[ -w /sys/fs/cgroup/cgroup.subtree_control ]]; then
         if grep -qw memory /sys/fs/cgroup/cgroup.controllers; then
@@ -364,7 +262,6 @@ main() {
         try_enable_cgroup_v2
     fi
 
-    ensure_swap
     setup_cgroup
     move_processes_once
     install_daemon_script
