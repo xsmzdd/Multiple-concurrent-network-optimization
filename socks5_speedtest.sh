@@ -35,6 +35,23 @@ run_root() {
     fi
 }
 
+python_venv_works() {
+    command -v python3 >/dev/null 2>&1 || return 1
+
+    local probe_dir="$WORK_DIR/venv-probe"
+    rm -rf "$probe_dir"
+
+    if python3 -m venv "$probe_dir" >/dev/null 2>&1 \
+        && [[ -x "$probe_dir/bin/python" ]] \
+        && "$probe_dir/bin/python" -m pip --version >/dev/null 2>&1; then
+        rm -rf "$probe_dir"
+        return 0
+    fi
+
+    rm -rf "$probe_dir"
+    return 1
+}
+
 install_system_dependencies() {
     local missing=()
     command -v curl    >/dev/null 2>&1 || missing+=(curl)
@@ -42,8 +59,8 @@ install_system_dependencies() {
     command -v python3 >/dev/null 2>&1 || missing+=(python3)
     command -v timeout >/dev/null 2>&1 || missing+=(timeout)
 
-    # 即使命令都存在，也需要确认 Python 能创建 venv。
-    if ((${#missing[@]} == 0)) && python3 -m venv --help >/dev/null 2>&1; then
+    # “python3 -m venv --help”并不能证明 ensurepip 可用，因此实际创建一个临时 venv 检查。
+    if ((${#missing[@]} == 0)) && python_venv_works; then
         ok "系统基础组件已就绪。"
         return
     fi
@@ -51,9 +68,18 @@ install_system_dependencies() {
     info "正在安装脚本运行所需组件……"
 
     if command -v apt-get >/dev/null 2>&1; then
-        run_root apt-get update -y
+        run_root apt-get update
         run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            curl ca-certificates iputils-ping python3 python3-venv python3-pip coreutils
+            curl ca-certificates iputils-ping python3 python3-pip coreutils
+
+        # Debian/Ubuntu 的 venv/ensurepip 通常由 python3-venv 或版本对应的包提供。
+        if ! python_venv_works; then
+            if ! run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv; then
+                local pyver
+                pyver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+                run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "python${pyver}-venv"
+            fi
+        fi
     elif command -v dnf >/dev/null 2>&1; then
         run_root dnf install -y curl ca-certificates iputils python3 python3-pip coreutils
     elif command -v yum >/dev/null 2>&1; then
@@ -69,17 +95,28 @@ install_system_dependencies() {
     command -v curl    >/dev/null 2>&1 || fail "curl 安装失败。"
     command -v ping    >/dev/null 2>&1 || fail "ping 安装失败。"
     command -v python3 >/dev/null 2>&1 || fail "python3 安装失败。"
+    command -v timeout >/dev/null 2>&1 || fail "timeout 安装失败。"
+    python_venv_works || fail "Python venv/ensurepip 仍不可用。Debian/Ubuntu 请安装 python3-venv 或对应版本的 pythonX.Y-venv。"
+
     ok "系统组件安装完成。"
+}
+
+venv_is_usable() {
+    [[ -x "$VENV_DIR/bin/python" ]] \
+        && "$VENV_DIR/bin/python" -m pip --version >/dev/null 2>&1
 }
 
 prepare_python_environment() {
     mkdir -p "$CACHE_ROOT"
 
-    if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+    # 上次创建失败时可能留下只有 python、没有 pip 的残缺目录，必须重建。
+    if ! venv_is_usable; then
         info "正在创建独立 Python 环境……"
         rm -rf "$VENV_DIR"
-        if ! python3 -m venv "$VENV_DIR"; then
-            fail "无法创建 Python venv。请安装 python3-venv 后重新运行。"
+        if ! python3 -m venv "$VENV_DIR" \
+            || ! "$VENV_DIR/bin/python" -m pip --version >/dev/null 2>&1; then
+            rm -rf "$VENV_DIR"
+            fail "无法创建可用的 Python venv。请确认已安装 python3-venv 或对应版本的 pythonX.Y-venv。"
         fi
     fi
 
