@@ -539,7 +539,7 @@ main() {
     [[ "$(uname -s)" == "Linux" ]] || fail "此版本脚本仅支持 Linux。"
 
     printf '\nSOCKS5 延迟与 Speedtest 测速脚本\n'
-    printf '----------------------------------\n'
+    printf '%s\n' '----------------------------------'
 
     install_system_dependencies
     prepare_python_environment
