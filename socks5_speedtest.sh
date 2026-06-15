@@ -54,7 +54,7 @@ python_venv_works() {
 
 
 # apt-get update 可能被与本脚本无关的第三方源拖垮。
-# 正常更新失败时，仅为“安装本脚本依赖”临时使用 Debian 官方源，
+# 正常更新失败时，仅为“安装本脚本依赖”临时使用当前系统对应的官方源，
 # 不改写、不删除用户现有的 /etc/apt 源配置。
 APT_ARGS=()
 
@@ -65,11 +65,13 @@ prepare_apt_for_dependencies() {
         return 0
     fi
 
-    warn "系统 APT 源存在失效条目，正在尝试仅使用 Debian 官方源安装脚本依赖。"
+    warn "系统 APT 源存在失效条目，正在尝试仅使用系统官方源安装脚本依赖。"
 
     local os_id=""
     local codename=""
-    local source_file="$WORK_DIR/debian-dependencies.list"
+    local source_file="$WORK_DIR/apt-dependencies.list"
+    local lists_dir="$WORK_DIR/apt-lists"
+    local arch=""
 
     if [[ -r /etc/os-release ]]; then
         # shellcheck disable=SC1091
@@ -78,45 +80,82 @@ prepare_apt_for_dependencies() {
         codename="${VERSION_CODENAME:-}"
     fi
 
-    [[ "$os_id" == "debian" ]] \
-        || fail "APT 更新失败，且当前系统不是可自动回退的 Debian。请先修复系统软件源。"
-    [[ -n "$codename" ]] \
-        || fail "无法识别 Debian 版本代号，请先修复系统软件源。"
+    [[ -n "$os_id" ]] || fail "无法识别当前 Linux 发行版，请先修复系统软件源。"
+    [[ -n "$codename" ]] || fail "无法识别系统版本代号，请先修复系统软件源。"
 
-    case "$codename" in
-        bullseye|bookworm|trixie)
-            cat > "$source_file" <<EOF
+    case "$os_id" in
+        debian)
+            case "$codename" in
+                bullseye|bookworm|trixie|forky)
+                    cat > "$source_file" <<EOF
 # 仅供本脚本安装依赖使用，不会覆盖系统源。
 deb https://deb.debian.org/debian $codename main contrib non-free non-free-firmware
 deb https://deb.debian.org/debian $codename-updates main contrib non-free non-free-firmware
 deb https://security.debian.org/debian-security $codename-security main contrib non-free non-free-firmware
 EOF
-            ;;
-        buster)
-            cat > "$source_file" <<'EOF'
+                    ;;
+                buster)
+                    cat > "$source_file" <<'EOF'
 # Debian 10 已归档；仅供本脚本安装依赖使用。
 deb http://archive.debian.org/debian buster main contrib non-free
 deb http://archive.debian.org/debian buster-updates main contrib non-free
 deb http://archive.debian.org/debian-security buster/updates main contrib non-free
 EOF
-            APT_ARGS+=( -o Acquire::Check-Valid-Until=false )
+                    APT_ARGS+=( -o Acquire::Check-Valid-Until=false )
+                    ;;
+                *)
+                    fail "APT 更新失败，脚本暂不支持为 Debian ${codename} 自动生成临时官方源。"
+                    ;;
+            esac
             ;;
+
+        ubuntu)
+            arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+
+            case "$codename" in
+                focal|jammy|noble|resolute)
+                    if [[ "$arch" == "amd64" || "$arch" == "i386" ]]; then
+                        cat > "$source_file" <<EOF
+# 仅供本脚本安装依赖使用，不会覆盖系统源。
+deb http://archive.ubuntu.com/ubuntu $codename main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu $codename-updates main restricted universe multiverse
+deb http://security.ubuntu.com/ubuntu $codename-security main restricted universe multiverse
+EOF
+                    else
+                        cat > "$source_file" <<EOF
+# Ubuntu 非 x86 架构官方源；仅供本脚本安装依赖使用。
+deb http://ports.ubuntu.com/ubuntu-ports $codename main restricted universe multiverse
+deb http://ports.ubuntu.com/ubuntu-ports $codename-updates main restricted universe multiverse
+deb http://ports.ubuntu.com/ubuntu-ports $codename-security main restricted universe multiverse
+EOF
+                    fi
+                    ;;
+                *)
+                    fail "APT 更新失败，脚本暂不支持为 Ubuntu ${codename} 自动生成临时官方源。"
+                    ;;
+            esac
+            ;;
+
         *)
-            fail "APT 更新失败，脚本暂不支持为 Debian ${codename} 自动生成临时官方源。"
+            fail "APT 更新失败，且当前系统 ${os_id} 暂不支持自动官方源回退。请先修复系统软件源。"
             ;;
     esac
 
     chmod 0644 "$source_file"
+    mkdir -p "$lists_dir/partial"
+
+    # 使用独立的软件包索引目录，避免失效第三方源残留的索引参与依赖安装。
     APT_ARGS+=(
         -o "Dir::Etc::sourcelist=$source_file"
         -o "Dir::Etc::sourceparts=-"
+        -o "Dir::State::lists=$lists_dir"
         -o "APT::Get::List-Cleanup=0"
     )
 
     run_root apt-get "${APT_ARGS[@]}" update \
-        || fail "使用 Debian 官方临时源更新仍然失败，请检查网络、DNS 和系统时间。"
+        || fail "使用系统官方临时源更新仍然失败，请检查网络、DNS 和系统时间。"
 
-    ok "已绕过失效的第三方 APT 源；仅使用 Debian 官方源安装本脚本依赖。"
+    ok "已绕过失效的第三方 APT 源；仅使用系统官方源安装本脚本依赖。"
 }
 
 apt_install_packages() {
@@ -381,9 +420,10 @@ PY
 run_http_latency_tests() {
     : > "$HTTP_TSV"
 
-    local names=("Cloudflare" "Google-204" "IPify")
+    local names=("Cloudflare" "Cloudflare-Speed" "Google-204" "IPify")
     local urls=(
         "https://www.cloudflare.com/cdn-cgi/trace"
+        "https://speed.cloudflare.com/"
         "https://www.google.com/generate_204"
         "https://api.ipify.org"
     )
