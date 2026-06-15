@@ -52,6 +52,78 @@ python_venv_works() {
     return 1
 }
 
+
+# apt-get update 可能被与本脚本无关的第三方源拖垮。
+# 正常更新失败时，仅为“安装本脚本依赖”临时使用 Debian 官方源，
+# 不改写、不删除用户现有的 /etc/apt 源配置。
+APT_ARGS=()
+
+prepare_apt_for_dependencies() {
+    APT_ARGS=()
+
+    if run_root apt-get update; then
+        return 0
+    fi
+
+    warn "系统 APT 源存在失效条目，正在尝试仅使用 Debian 官方源安装脚本依赖。"
+
+    local os_id=""
+    local codename=""
+    local source_file="$WORK_DIR/debian-dependencies.list"
+
+    if [[ -r /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        os_id="${ID:-}"
+        codename="${VERSION_CODENAME:-}"
+    fi
+
+    [[ "$os_id" == "debian" ]] \
+        || fail "APT 更新失败，且当前系统不是可自动回退的 Debian。请先修复系统软件源。"
+    [[ -n "$codename" ]] \
+        || fail "无法识别 Debian 版本代号，请先修复系统软件源。"
+
+    case "$codename" in
+        bullseye|bookworm|trixie)
+            cat > "$source_file" <<EOF
+# 仅供本脚本安装依赖使用，不会覆盖系统源。
+deb https://deb.debian.org/debian $codename main contrib non-free non-free-firmware
+deb https://deb.debian.org/debian $codename-updates main contrib non-free non-free-firmware
+deb https://security.debian.org/debian-security $codename-security main contrib non-free non-free-firmware
+EOF
+            ;;
+        buster)
+            cat > "$source_file" <<'EOF'
+# Debian 10 已归档；仅供本脚本安装依赖使用。
+deb http://archive.debian.org/debian buster main contrib non-free
+deb http://archive.debian.org/debian buster-updates main contrib non-free
+deb http://archive.debian.org/debian-security buster/updates main contrib non-free
+EOF
+            APT_ARGS+=( -o Acquire::Check-Valid-Until=false )
+            ;;
+        *)
+            fail "APT 更新失败，脚本暂不支持为 Debian ${codename} 自动生成临时官方源。"
+            ;;
+    esac
+
+    chmod 0644 "$source_file"
+    APT_ARGS+=(
+        -o "Dir::Etc::sourcelist=$source_file"
+        -o "Dir::Etc::sourceparts=-"
+        -o "APT::Get::List-Cleanup=0"
+    )
+
+    run_root apt-get "${APT_ARGS[@]}" update \
+        || fail "使用 Debian 官方临时源更新仍然失败，请检查网络、DNS 和系统时间。"
+
+    ok "已绕过失效的第三方 APT 源；仅使用 Debian 官方源安装本脚本依赖。"
+}
+
+apt_install_packages() {
+    run_root env DEBIAN_FRONTEND=noninteractive \
+        apt-get "${APT_ARGS[@]}" install -y "$@"
+}
+
 install_system_dependencies() {
     local missing=()
     command -v curl    >/dev/null 2>&1 || missing+=(curl)
@@ -68,16 +140,16 @@ install_system_dependencies() {
     info "正在安装脚本运行所需组件……"
 
     if command -v apt-get >/dev/null 2>&1; then
-        run_root apt-get update
-        run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        prepare_apt_for_dependencies
+        apt_install_packages \
             curl ca-certificates iputils-ping python3 python3-pip coreutils
 
         # Debian/Ubuntu 的 venv/ensurepip 通常由 python3-venv 或版本对应的包提供。
         if ! python_venv_works; then
-            if ! run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv; then
+            if ! apt_install_packages python3-venv; then
                 local pyver
                 pyver="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
-                run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "python${pyver}-venv"
+                apt_install_packages "python${pyver}-venv"
             fi
         fi
     elif command -v dnf >/dev/null 2>&1; then
