@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
+
 # SOCKS5 延迟与测速脚本
 # 支持：Debian/Ubuntu、RHEL/CentOS/Rocky/Alma、Fedora、Alpine、Arch Linux
+# Speedtest 节点策略：先检测代理出口国家/城市，再优先选择同国家同城市节点。
 
 set -Eeuo pipefail
 
@@ -20,10 +22,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-info()  { printf '\033[1;34m[信息]\033[0m %s\n' "$*"; }
-ok()    { printf '\033[1;32m[完成]\033[0m %s\n' "$*"; }
-warn()  { printf '\033[1;33m[提示]\033[0m %s\n' "$*"; }
-fail()  { printf '\033[1;31m[错误]\033[0m %s\n' "$*" >&2; exit 1; }
+info() { printf '\033[1;34m[信息]\033[0m %s\n' "$*"; }
+ok() { printf '\033[1;32m[完成]\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m[提示]\033[0m %s\n' "$*"; }
+fail() { printf '\033[1;31m[错误]\033[0m %s\n' "$*" >&2; exit 1; }
 
 run_root() {
     if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
@@ -37,10 +39,9 @@ run_root() {
 
 python_venv_works() {
     command -v python3 >/dev/null 2>&1 || return 1
-
     local probe_dir="$WORK_DIR/venv-probe"
-    rm -rf "$probe_dir"
 
+    rm -rf "$probe_dir"
     if python3 -m venv "$probe_dir" >/dev/null 2>&1 \
         && [[ -x "$probe_dir/bin/python" ]] \
         && "$probe_dir/bin/python" -m pip --version >/dev/null 2>&1; then
@@ -52,15 +53,13 @@ python_venv_works() {
     return 1
 }
 
-
 # apt-get update 可能被与本脚本无关的第三方源拖垮。
-# 正常更新失败时，仅为“安装本脚本依赖”临时使用当前系统对应的官方源，
+# 正常更新失败时，仅为安装本脚本依赖临时使用系统官方源；
 # 不改写、不删除用户现有的 /etc/apt 源配置。
 APT_ARGS=()
 
 prepare_apt_for_dependencies() {
     APT_ARGS=()
-
     if run_root apt-get update; then
         return 0
     fi
@@ -108,10 +107,8 @@ EOF
                     ;;
             esac
             ;;
-
         ubuntu)
             arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
-
             case "$codename" in
                 focal|jammy|noble|resolute)
                     if [[ "$arch" == "amd64" || "$arch" == "i386" ]]; then
@@ -135,7 +132,6 @@ EOF
                     ;;
             esac
             ;;
-
         *)
             fail "APT 更新失败，且当前系统 ${os_id} 暂不支持自动官方源回退。请先修复系统软件源。"
             ;;
@@ -144,7 +140,6 @@ EOF
     chmod 0644 "$source_file"
     mkdir -p "$lists_dir/partial"
 
-    # 使用独立的软件包索引目录，避免失效第三方源残留的索引参与依赖安装。
     APT_ARGS+=(
         -o "Dir::Etc::sourcelist=$source_file"
         -o "Dir::Etc::sourceparts=-"
@@ -165,12 +160,12 @@ apt_install_packages() {
 
 install_system_dependencies() {
     local missing=()
-    command -v curl    >/dev/null 2>&1 || missing+=(curl)
-    command -v ping    >/dev/null 2>&1 || missing+=(ping)
+
+    command -v curl >/dev/null 2>&1 || missing+=(curl)
+    command -v ping >/dev/null 2>&1 || missing+=(ping)
     command -v python3 >/dev/null 2>&1 || missing+=(python3)
     command -v timeout >/dev/null 2>&1 || missing+=(timeout)
 
-    # “python3 -m venv --help”并不能证明 ensurepip 可用，因此实际创建一个临时 venv 检查。
     if ((${#missing[@]} == 0)) && python_venv_works; then
         ok "系统基础组件已就绪。"
         return
@@ -183,7 +178,6 @@ install_system_dependencies() {
         apt_install_packages \
             curl ca-certificates iputils-ping python3 python3-pip coreutils
 
-        # Debian/Ubuntu 的 venv/ensurepip 通常由 python3-venv 或版本对应的包提供。
         if ! python_venv_works; then
             if ! apt_install_packages python3-venv; then
                 local pyver
@@ -203,8 +197,8 @@ install_system_dependencies() {
         fail "无法识别系统包管理器。请手动安装：curl、ping、python3、python3-venv/pip、timeout。"
     fi
 
-    command -v curl    >/dev/null 2>&1 || fail "curl 安装失败。"
-    command -v ping    >/dev/null 2>&1 || fail "ping 安装失败。"
+    command -v curl >/dev/null 2>&1 || fail "curl 安装失败。"
+    command -v ping >/dev/null 2>&1 || fail "ping 安装失败。"
     command -v python3 >/dev/null 2>&1 || fail "python3 安装失败。"
     command -v timeout >/dev/null 2>&1 || fail "timeout 安装失败。"
     python_venv_works || fail "Python venv/ensurepip 仍不可用。Debian/Ubuntu 请安装 python3-venv 或对应版本的 pythonX.Y-venv。"
@@ -220,10 +214,10 @@ venv_is_usable() {
 prepare_python_environment() {
     mkdir -p "$CACHE_ROOT"
 
-    # 上次创建失败时可能留下只有 python、没有 pip 的残缺目录，必须重建。
     if ! venv_is_usable; then
         info "正在创建独立 Python 环境……"
         rm -rf "$VENV_DIR"
+
         if ! python3 -m venv "$VENV_DIR" \
             || ! "$VENV_DIR/bin/python" -m pip --version >/dev/null 2>&1; then
             rm -rf "$VENV_DIR"
@@ -240,6 +234,7 @@ prepare_python_environment() {
 
     "$py" -c 'import socks, speedtest' >/dev/null 2>&1 \
         || fail "Python 测速组件安装失败。"
+
     ok "Python 测速组件已就绪。"
 }
 
@@ -257,7 +252,6 @@ validate_proxy_input() {
     ((${#PROXY_USER} <= 255)) || fail "SOCKS5 用户名不能超过 255 字节。"
     ((${#PROXY_PASS} <= 255)) || fail "SOCKS5 密码不能超过 255 字节。"
 
-    # 该输入格式不支持带冒号的 IPv6 地址。
     [[ "$PROXY_HOST" != *:* ]] || fail "当前输入格式不支持 IPv6 地址，请使用 IPv4 或主机名。"
 }
 
@@ -282,6 +276,7 @@ write_private_configs() {
 proxy = "socks5h://${esc_host}:${PROXY_PORT}"
 proxy-user = "${esc_user}:${esc_pass}"
 EOF
+
     chmod 600 "$PROXY_INFO" "$CURL_CFG"
 }
 
@@ -292,6 +287,7 @@ run_ping_test() {
     if ping -n -c 4 -W 2 "$PROXY_HOST" >"$PING_OUT" 2>&1; then
         local avg
         avg="$(awk -F'/' '/min\/avg\/max|round-trip/ {print $5; exit}' "$PING_OUT" 2>/dev/null || true)"
+
         if [[ -z "$avg" ]]; then
             avg="$(awk '
                 /time[=<]/ {
@@ -303,6 +299,7 @@ run_ping_test() {
                 END {if (n>0) printf "%.2f", sum/n}
             ' "$PING_OUT")"
         fi
+
         [[ -n "$avg" ]] && PING_RESULT="${avg} ms"
     fi
 }
@@ -346,38 +343,48 @@ def tcp_once(host, port, timeout=5):
 
 def socks_handshake_once(host, port, username, password, timeout=7):
     start = time.perf_counter()
-    with socket.create_connection((host, port), timeout=timeout) as s:
-        s.settimeout(timeout)
-        # 同时声明支持“无认证”和“用户名密码认证”，由服务端选择。
-        s.sendall(bytes([0x05, 0x02, 0x00, 0x02]))
-        version, method = recv_exact(s, 2)
+    with socket.create_connection((host, port), timeout=timeout) as sock:
+        sock.settimeout(timeout)
+        sock.sendall(bytes([0x05, 0x02, 0x00, 0x02]))
+        version, method = recv_exact(sock, 2)
+
         if version != 0x05:
             raise RuntimeError(f"无效 SOCKS 版本: {version}")
         if method == 0xFF:
             raise PermissionError("代理拒绝了所有认证方式")
+
         if method == 0x02:
             user_b = username.encode("utf-8")
             pass_b = password.encode("utf-8")
             if len(user_b) > 255 or len(pass_b) > 255:
                 raise ValueError("用户名或密码超过 SOCKS5 限制")
-            s.sendall(bytes([0x01, len(user_b)]) + user_b + bytes([len(pass_b)]) + pass_b)
-            auth_ver, status = recv_exact(s, 2)
+
+            sock.sendall(
+                bytes([0x01, len(user_b)])
+                + user_b
+                + bytes([len(pass_b)])
+                + pass_b
+            )
+            auth_ver, status = recv_exact(sock, 2)
             if auth_ver != 0x01 or status != 0x00:
                 raise PermissionError("SOCKS5 用户名或密码认证失败")
         elif method != 0x00:
             raise RuntimeError(f"代理选择了不支持的认证方式: {method}")
+
     return (time.perf_counter() - start) * 1000
 
 
 def measure(func, count=5):
     values = []
     errors = []
+
     for _ in range(count):
         try:
             values.append(func())
         except Exception as exc:
             errors.append(f"{type(exc).__name__}: {exc}")
         time.sleep(0.15)
+
     if not values:
         return {
             "ok": False,
@@ -385,6 +392,7 @@ def measure(func, count=5):
             "attempts": count,
             "error": errors[-1] if errors else "未知错误",
         }
+
     return {
         "ok": True,
         "successes": len(values),
@@ -449,7 +457,11 @@ run_http_latency_tests() {
 
             if [[ $rc -eq 0 ]]; then
                 IFS=$'\t' read -r connect first total code <<< "$output"
-                if [[ "$connect" =~ ^[0-9.]+$ && "$first" =~ ^[0-9.]+$ && "$total" =~ ^[0-9.]+$ && "$code" =~ ^[0-9]{3}$ && "$code" != "000" ]]; then
+                if [[ "$connect" =~ ^[0-9.]+$ \
+                    && "$first" =~ ^[0-9.]+$ \
+                    && "$total" =~ ^[0-9.]+$ \
+                    && "$code" =~ ^[0-9]{3}$ \
+                    && "$code" != "000" ]]; then
                     sum_connect="$(awk -v a="$sum_connect" -v b="$connect" 'BEGIN{printf "%.6f", a+b}')"
                     sum_first="$(awk -v a="$sum_first" -v b="$first" 'BEGIN{printf "%.6f", a+b}')"
                     sum_total="$(awk -v a="$sum_total" -v b="$total" 'BEGIN{printf "%.6f", a+b}')"
@@ -463,6 +475,7 @@ run_http_latency_tests() {
             avg_connect="$(awk -v s="$sum_connect" -v n="$count" 'BEGIN{printf "%.2f", s*1000/n}')"
             avg_first="$(awk -v s="$sum_first" -v n="$count" 'BEGIN{printf "%.2f", s*1000/n}')"
             avg_total="$(awk -v s="$sum_total" -v n="$count" 'BEGIN{printf "%.2f", s*1000/n}')"
+
             printf '%s\t成功\t%s\t%s\t%s\t%s\n' \
                 "${names[$i]}" "$avg_connect" "$avg_first" "$avg_total" "$count" >> "$HTTP_TSV"
         else
@@ -475,6 +488,7 @@ run_http_latency_tests() {
         --connect-timeout 10 --max-time 20 https://api.ipify.org 2>/dev/null)"
     rc=$?
     set -e
+
     if [[ $rc -ne 0 || -z "$EXIT_IP" ]]; then
         EXIT_IP="获取失败"
     fi
@@ -486,9 +500,12 @@ run_speedtest() {
 
     cat > "$helper" <<'PY'
 import json
+import math
 import socket
 import sys
 import time
+import unicodedata
+from urllib.request import Request, urlopen
 
 import socks
 
@@ -501,10 +518,218 @@ def read_proxy(path):
     return lines[0], int(lines[1]), lines[2], lines[3]
 
 
+def to_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_json(url, timeout=12):
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 socks5-speedtest/2.0",
+            "Accept": "application/json",
+        },
+    )
+    with urlopen(request, timeout=timeout) as response:
+        raw = response.read().decode("utf-8", errors="replace")
+    return json.loads(raw)
+
+
+def empty_location(errors=None):
+    return {
+        "provider": "",
+        "ip": "",
+        "country_code": "",
+        "country_name": "",
+        "region": "",
+        "city": "",
+        "latitude": None,
+        "longitude": None,
+        "errors": errors or [],
+    }
+
+
+def detect_exit_location():
+    """定位请求在 socket 替换后执行，因此也会经过 SOCKS5。"""
+    errors = []
+    providers = (
+        ("ipwho.is", "https://ipwho.is/"),
+        ("ipapi.co", "https://ipapi.co/json/"),
+    )
+
+    for provider, url in providers:
+        try:
+            data = fetch_json(url)
+
+            if provider == "ipwho.is":
+                if data.get("success") is False:
+                    raise RuntimeError(data.get("message") or "定位接口返回失败")
+                country_code = data.get("country_code") or ""
+                country_name = data.get("country") or ""
+            else:
+                if data.get("error"):
+                    raise RuntimeError(
+                        data.get("reason")
+                        or data.get("message")
+                        or "定位接口返回失败"
+                    )
+                country_code = data.get("country_code") or data.get("country") or ""
+                country_name = data.get("country_name") or ""
+
+            country_code = str(country_code).strip().upper()
+            if len(country_code) != 2:
+                raise RuntimeError("定位结果没有有效的两位国家代码")
+
+            return {
+                "provider": provider,
+                "ip": str(data.get("ip") or "").strip(),
+                "country_code": country_code,
+                "country_name": str(country_name).strip(),
+                "region": str(data.get("region") or data.get("region_name") or "").strip(),
+                "city": str(data.get("city") or "").strip(),
+                "latitude": to_float(data.get("latitude")),
+                "longitude": to_float(data.get("longitude")),
+                "errors": errors,
+            }
+        except Exception as exc:
+            errors.append(f"{provider}: {type(exc).__name__}: {exc}")
+
+    return empty_location(errors)
+
+
+def normalize_place(value):
+    value = unicodedata.normalize("NFKD", str(value or ""))
+    value = "".join(char for char in value if not unicodedata.combining(char))
+    value = value.casefold()
+    return " ".join(
+        "".join(char if char.isalnum() else " " for char in value).split()
+    )
+
+
+def city_matches(server_name, detected_city):
+    if not server_name or not detected_city:
+        return False
+
+    full_name = normalize_place(server_name)
+    main_name = normalize_place(str(server_name).split(",", 1)[0])
+    city_name = normalize_place(detected_city)
+
+    if not city_name or not main_name:
+        return False
+
+    return (
+        full_name == city_name
+        or main_name == city_name
+        or full_name.startswith(city_name + " ")
+        or city_name.startswith(main_name + " ")
+    )
+
+
+def haversine_distance(lat1, lon1, lat2, lon2):
+    radius = 6371.0
+    lat1 = math.radians(float(lat1))
+    lon1 = math.radians(float(lon1))
+    lat2 = math.radians(float(lat2))
+    lon2 = math.radians(float(lon2))
+    delta_lat = lat2 - lat1
+    delta_lon = lon2 - lon1
+
+    value = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2) ** 2
+    )
+    value = min(1.0, max(0.0, value))
+    return radius * 2 * math.atan2(math.sqrt(value), math.sqrt(1 - value))
+
+
+def server_distance(server, location):
+    location_lat = location.get("latitude")
+    location_lon = location.get("longitude")
+    server_lat = to_float(server.get("lat"))
+    server_lon = to_float(server.get("lon"))
+
+    if (
+        location_lat is not None
+        and location_lon is not None
+        and server_lat is not None
+        and server_lon is not None
+    ):
+        return haversine_distance(
+            location_lat,
+            location_lon,
+            server_lat,
+            server_lon,
+        )
+
+    distance = to_float(server.get("d"))
+    return distance if distance is not None else float("inf")
+
+
+def flatten_servers(server_groups):
+    servers = []
+    for group in server_groups.values():
+        servers.extend(group)
+    return servers
+
+
+def choose_server(speedtest_client, location):
+    server_groups = speedtest_client.get_servers()
+    all_servers = flatten_servers(server_groups)
+    if not all_servers:
+        raise RuntimeError("Speedtest 没有返回可用测速节点")
+
+    country_code = str(location.get("country_code") or "").upper()
+    city = str(location.get("city") or "")
+
+    same_country = [
+        server
+        for server in all_servers
+        if str(server.get("cc") or "").upper() == country_code
+    ]
+    same_city = [
+        server
+        for server in same_country
+        if city_matches(server.get("name"), city)
+    ]
+
+    if same_city:
+        same_city.sort(key=lambda server: server_distance(server, location))
+        candidates = same_city[:10]
+        best = speedtest_client.get_best_server(candidates)
+        return best, {
+            "mode": "same_city",
+            "description": "同国家、同城市",
+            "candidate_count": len(same_city),
+            "latency_tested_count": len(candidates),
+        }
+
+    if same_country:
+        same_country.sort(key=lambda server: server_distance(server, location))
+        candidates = same_country[:10]
+        best = speedtest_client.get_best_server(candidates)
+        return best, {
+            "mode": "same_country_nearest",
+            "description": "未找到同城节点，使用同国家最近候选节点",
+            "candidate_count": len(same_country),
+            "latency_tested_count": len(candidates),
+        }
+
+    best = speedtest_client.get_best_server()
+    return best, {
+        "mode": "automatic",
+        "description": "定位失败或无同国家节点，使用 Speedtest 自动节点",
+        "candidate_count": len(all_servers),
+        "latency_tested_count": 5,
+    }
+
+
 def main():
     host, port, username, password = read_proxy(sys.argv[1])
 
-    # 在导入 speedtest 之前替换 socket，确保配置、服务器列表、下载和上传均走 SOCKS5。
+    # 在导入 speedtest 之前替换 socket，确保定位、配置、节点列表及测速全部走 SOCKS5。
     socks.set_default_proxy(
         socks.SOCKS5,
         host,
@@ -514,10 +739,13 @@ def main():
         password=password,
     )
 
-    # 覆盖 create_connection，避免 Python 标准库先在本机解析测速服务器域名。
     original_timeout = socket._GLOBAL_DEFAULT_TIMEOUT
 
-    def proxy_create_connection(address, timeout=original_timeout, source_address=None):
+    def proxy_create_connection(
+        address,
+        timeout=original_timeout,
+        source_address=None,
+    ):
         effective_timeout = None if timeout is original_timeout else timeout
         return socks.create_connection(
             address,
@@ -537,21 +765,45 @@ def main():
     import speedtest
 
     started = time.perf_counter()
-    st = speedtest.Speedtest(secure=True, timeout=20)
-    best = st.get_best_server()
-    download_bps = st.download()
-    upload_bps = st.upload(pre_allocate=False)
+    location = detect_exit_location()
+    speedtest_client = speedtest.Speedtest(secure=True, timeout=20)
+
+    # 外部定位接口均失败时，用 Speedtest 配置中的国家和坐标回退。
+    # Speedtest 配置通常没有城市字段，因此此时只能选择同国家最近节点。
+    if not location.get("country_code"):
+        client = speedtest_client.config.get("client", {})
+        location["provider"] = "Speedtest.net"
+        location["ip"] = str(client.get("ip") or "")
+        location["country_code"] = str(client.get("country") or "").upper()
+        location["latitude"] = to_float(client.get("lat"))
+        location["longitude"] = to_float(client.get("lon"))
+
+    best, selection = choose_server(speedtest_client, location)
+    download_bps = speedtest_client.download()
+    upload_bps = speedtest_client.upload(pre_allocate=False)
 
     result = {
         "ok": True,
         "engine": "speedtest-cli / Speedtest.net",
+        "exit_ip": location.get("ip", ""),
+        "exit_country_code": location.get("country_code", ""),
+        "exit_country": location.get("country_name", ""),
+        "exit_region": location.get("region", ""),
+        "exit_city": location.get("city", ""),
+        "geo_provider": location.get("provider", ""),
+        "geo_errors": location.get("errors", []),
+        "selection_mode": selection["mode"],
+        "selection_description": selection["description"],
+        "candidate_count": selection["candidate_count"],
+        "latency_tested_count": selection["latency_tested_count"],
         "server_id": str(best.get("id", "")),
         "server_name": best.get("name", ""),
         "server_country": best.get("country", ""),
+        "server_country_code": best.get("cc", ""),
         "server_sponsor": best.get("sponsor", ""),
         "server_host": best.get("host", ""),
         "distance_km": round(float(best.get("d", 0.0)), 2),
-        "ping_ms": round(float(st.results.ping), 2),
+        "ping_ms": round(float(speedtest_client.results.ping), 2),
         "download_mbps": round(download_bps / 1_000_000, 2),
         "upload_mbps": round(upload_bps / 1_000_000, 2),
         "elapsed_seconds": round(time.perf_counter() - started, 2),
@@ -563,14 +815,20 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        print(json.dumps({
-            "ok": False,
-            "error": f"{type(exc).__name__}: {exc}",
-        }, ensure_ascii=False))
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+                ensure_ascii=False,
+            )
+        )
         raise SystemExit(1)
 PY
 
-    info "正在通过 SOCKS5 运行 Speedtest 下载/上传测速……"
+    info "正在通过 SOCKS5 检测出口位置并运行 Speedtest 下载/上传测速……"
+
     local rc
     set +e
     if command -v timeout >/dev/null 2>&1; then
@@ -591,6 +849,7 @@ PY
 
 print_json_section() {
     local py="$VENV_DIR/bin/python"
+
     "$py" - "$LATENCY_JSON" "$SPEED_JSON" <<'PY'
 import json
 import sys
@@ -608,7 +867,6 @@ def load(path, fallback):
 
 latency = load(latency_path, {})
 speed = load(speed_path, {"ok": False, "error": "无法解析测速结果"})
-
 tcp = latency.get("tcp", {})
 handshake = latency.get("socks_handshake", {})
 
@@ -637,14 +895,31 @@ else:
 
 print("\n--- Speedtest 测速 ---")
 if speed.get("ok"):
+    location_parts = [
+        speed.get("exit_country") or speed.get("exit_country_code", ""),
+        speed.get("exit_region", ""),
+        speed.get("exit_city", ""),
+    ]
+    location_text = " / ".join(x for x in location_parts if x) or "定位失败"
+
     server_parts = [
         speed.get("server_sponsor", ""),
         speed.get("server_name", ""),
         speed.get("server_country", ""),
     ]
     server = " / ".join(x for x in server_parts if x) or "未知服务器"
-    print(f"测速引擎: {speed.get('engine', 'Speedtest')} ")
-    print(f"测速服务器: {server}（ID: {speed.get('server_id', '-') }）")
+
+    print(f"测速引擎: {speed.get('engine', 'Speedtest')}")
+    print(
+        f"出口位置: {location_text}"
+        f"（IP: {speed.get('exit_ip') or '-'}，定位来源: {speed.get('geo_provider') or '-'}）"
+    )
+    print(
+        f"节点选择: {speed.get('selection_description', '-')}"
+        f"（匹配 {speed.get('candidate_count', 0)} 个，"
+        f"延迟比较 {speed.get('latency_tested_count', 0)} 个）"
+    )
+    print(f"测速服务器: {server}（ID: {speed.get('server_id', '-')}）")
     print(f"服务器距离: {speed.get('distance_km', 0):.2f} km")
     print(f"Speedtest Ping: {speed.get('ping_ms', 0):.2f} ms")
     print(f"下载速度: {speed.get('download_mbps', 0):.2f} Mbps")
@@ -659,6 +934,7 @@ print_report() {
     printf '\n\033[1;36m================ SOCKS5 测试结果 ================\033[0m\n'
     printf '代理地址: %s:%s\n' "$PROXY_HOST" "$PROXY_PORT"
     printf '代理出口IP: %s\n' "$EXIT_IP"
+
     printf '\n--- 测试机到代理的延迟 ---\n'
     if [[ "$PING_RESULT" == "测试延迟失败" ]]; then
         printf 'Ping: 测试延迟失败\n'
@@ -670,6 +946,7 @@ print_report() {
 
     printf '\n--- 通过代理访问网站的延迟 ---\n'
     printf '%-14s %-8s %-14s %-14s %-14s\n' "目标" "状态" "连接代理" "首字节" "总耗时"
+
     while IFS=$'\t' read -r name status connect first total samples; do
         if [[ "$status" == "成功" ]]; then
             printf '%-14s %-8s %-14s %-14s %-14s\n' \
@@ -681,7 +958,8 @@ print_report() {
     done < "$HTTP_TSV"
 
     printf '\033[1;36m==================================================\033[0m\n'
-    warn "TCP/握手延迟最能反映测试机到 SOCKS5 的质量；Speedtest Ping 还包含代理到测速服务器的路径。"
+    warn "Speedtest 优先选择出口 IP 同国家同城市节点；无同城节点时选择同国家最近候选节点。"
+    warn "IP 城市定位属于近似数据，可能显示为运营商注册城市。"
 }
 
 main() {
