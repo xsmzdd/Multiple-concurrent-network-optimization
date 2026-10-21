@@ -21,8 +21,7 @@ PORT_COUNT=4
 PORT_BAND=""
 SELECT_MODE=0
 SUMMARY_CSV=""
-declare -A PORT_STATUS
-declare -a SERVER_PIDS=()
+LOG_DIR=""
 
 # 颜色美化
 RED='\033[0;31m'
@@ -53,7 +52,7 @@ show_menu(){
     echo -e "  ${GREEN}1${NC} | TCP 单独测试"
     echo -e "  ${GREEN}2${NC} | UDP 单独测试"
     echo -e "  ${GREEN}3${NC} | TCP + UDP 依次测试 (T/U模式)"
-    echo -e "  ${GREEN}4${NC} | 读取历史日志，生成汇总报告"
+    echo -e "  ${GREEN}4${NC} | 读取历史日志，生成汇总报告+HTML图表"
     echo -e "  ${GREEN}0${NC} | 退出脚本"
     echo -e "${CYAN}====================================================${NC}"
     echo -n "请输入选项 [0-4] : "
@@ -79,6 +78,7 @@ input_params(){
         PORT_BAND=${PORT_BAND:-$DEFAULT_UDP_BAND}
     else
         read -p "请输入单端口TCP带宽限制 (回车默认不限制): " PORT_BAND
+        PORT_BAND=${PORT_BAND:-}
     fi
 
     echo -e "\n${GREEN}配置确认:${NC}"
@@ -100,10 +100,14 @@ init_run(){
     mkdir -p "${LOG_DIR}/tcp" "${LOG_DIR}/udp"
     SUMMARY_CSV="${LOG_DIR}/summary_all.csv"
     echo "run_id,mode,port,status,rx_mbps,tx_mbps,loss_pct,jitter_ms" > "${SUMMARY_CSV}"
-    PORT_STATUS=()
 }
 
-# 单端口测试（带重试）
+# 数字校验函数，防止bc报错
+is_number(){
+    [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]]
+}
+
+# 单端口测试（带重试，仅写CSV文件，不依赖共享变量）
 test_single_port(){
     local port="$1"
     local mode="$2"
@@ -134,24 +138,33 @@ test_single_port(){
     local status="error"
     local rx_mbps="0.00"
     local tx_mbps="0.00"
-    local loss_pct="-"
-    local jitter_ms="-"
+    local loss_pct="0.00"
+    local jitter_ms="0.00"
 
     if [ $ret -eq 124 ];then
         status="timeout"
     elif [ $ret -eq 0 ] && [ -f "${log_json}" ] && jq -r '.end' "${log_json}" &>/dev/null;then
         status="ok"
+        local tx_bps rx_bps
         tx_bps=$(jq -r '.end.sum_sent.bits_per_second // 0' "${log_json}")
         rx_bps=$(jq -r '.end.sum_receiver.bits_per_second // 0' "${log_json}")
+
+        # 数值校验，非数字置0，避免bc报错
+        is_number "$tx_bps" || tx_bps=0
+        is_number "$rx_bps" || rx_bps=0
+
         tx_mbps=$(echo "scale=2; $tx_bps / 1000000" | bc -l)
         rx_mbps=$(echo "scale=2; $rx_bps / 1000000" | bc -l)
+
         if [ "$mode" = "udp" ];then
             loss_pct=$(jq -r '.end.sum_receiver.loss_percent // 0' "${log_json}")
             jitter_ms=$(jq -r '.end.sum_receiver.jitter_ms // 0' "${log_json}")
+            is_number "$loss_pct" || loss_pct=0
+            is_number "$jitter_ms" || jitter_ms=0
         fi
     fi
 
-    PORT_STATUS["${mode}_${port}"]="$status"
+    # 仅写入CSV，不依赖全局数组
     echo "${RUN_ID},${mode},${port},${status},${rx_mbps},${tx_mbps},${loss_pct},${jitter_ms}" >> "${SUMMARY_CSV}"
 }
 
@@ -169,35 +182,208 @@ run_batch_test(){
     wait "${pids[@]}"
 }
 
-# 输出本轮结果汇总
+# 输出本轮结果汇总（从CSV读取，修复并行变量不共享问题）
 print_summary(){
     echo -e "\n${CYAN}==================== 本轮测试结果 ====================${NC}"
     local ok=0 timeout=0 err=0
 
-    for ((i=0; i<PORT_COUNT; i++));do
-        port=$(( BASE_PORT + i ))
-        for m in tcp udp;do
-            if [ $SELECT_MODE -eq 1 ] && [ "$m" = "udp" ];then continue;fi
-            if [ $SELECT_MODE -eq 2 ] && [ "$m" = "tcp" ];then continue;fi
-            key="${m}_${port}"
-            s="${PORT_STATUS[$key]:-error}"
-            case $s in
-                ok) ok=$((ok+1)) ;;
-                timeout)
-                    timeout=$((timeout+1))
-                    echo -e "${YELLOW}[超时] ${m^^} 端口 $port${NC}"
-                ;;
-                error)
-                    err=$((err+1))
-                    echo -e "${RED}[异常] ${m^^} 端口 $port${NC}"
-                ;;
-            esac
-        done
-    done
+    # 从CSV统计状态
+    while IFS=',' read -r _ _ _ status _ _ _ _; do
+        case "$status" in
+            ok) ok=$((ok+1)) ;;
+            timeout) timeout=$((timeout+1)) ;;
+            error) err=$((err+1)) ;;
+        esac
+    done < <(tail -n +2 "${SUMMARY_CSV}")
+
+    # 列出异常端口
+    awk -F',' 'NR>1 && $4!="ok" {
+        if($4=="timeout") printf "\033[1;33m[超时] %s 端口 %s\033[0m\n", toupper($2), $3
+        else printf "\033[0;31m[异常] %s 端口 %s\033[0m\n", toupper($2), $3
+    }' "${SUMMARY_CSV}"
 
     echo -e "\n${GREEN}✅ 正常: $ok  | ${YELLOW}⏱️ 超时: $timeout | ${RED}❌ 异常: $err${NC}"
     echo -e "日志目录: ${LOG_DIR}"
     echo -e "汇总文件: ${SUMMARY_CSV}"
+}
+
+# 生成HTML图表报告
+gen_html_report(){
+    local csv_file="$1"
+    local run_id="$2"
+    local html_file="${LOG_ROOT}/${run_id}/report_${run_id}.html"
+
+    # 提取TCP和UDP数据
+    local tcp_data udp_data
+    tcp_data=$(awk -F',' 'NR>1 && $2=="tcp" {print $3","$5","$6}' "$csv_file")
+    udp_data=$(awk -F',' 'NR>1 && $2=="udp" {print $3","$5","$6","$7","$8}' "$csv_file")
+
+    # 生成JS数组格式
+    local tcp_ports tcp_rx tcp_tx
+    tcp_ports=$(echo "$tcp_data" | awk -F',' '{print "\""$1"\""}' | paste -sd, -)
+    tcp_rx=$(echo "$tcp_data" | awk -F',' '{print $2}' | paste -sd, -)
+    tcp_tx=$(echo "$tcp_data" | awk -F',' '{print $3}' | paste -sd, -)
+
+    local udp_ports udp_rx udp_tx udp_loss udp_jitter
+    udp_ports=$(echo "$udp_data" | awk -F',' '{print "\""$1"\""}' | paste -sd, -)
+    udp_rx=$(echo "$udp_data" | awk -F',' '{print $2}' | paste -sd, -)
+    udp_tx=$(echo "$udp_data" | awk -F',' '{print $3}' | paste -sd, -)
+    udp_loss=$(echo "$udp_data" | awk -F',' '{print $4}' | paste -sd, -)
+    udp_jitter=$(echo "$udp_data" | awk -F',' '{print $5}' | paste -sd, -)
+
+    # 计算平均值
+    local avg_tcp_rx avg_tcp_tx avg_udp_rx avg_udp_tx avg_loss avg_jitter
+    avg_tcp_rx=$(awk -F',' 'NR>1 && $2=="tcp" {sum+=$5; count++} END {if(count>0) printf "%.2f", sum/count; else print 0}' "$csv_file")
+    avg_tcp_tx=$(awk -F',' 'NR>1 && $2=="tcp" {sum+=$6; count++} END {if(count>0) printf "%.2f", sum/count; else print 0}' "$csv_file")
+    avg_udp_rx=$(awk -F',' 'NR>1 && $2=="udp" {sum+=$5; count++} END {if(count>0) printf "%.2f", sum/count; else print 0}' "$csv_file")
+    avg_udp_tx=$(awk -F',' 'NR>1 && $2=="udp" {sum+=$6; count++} END {if(count>0) printf "%.2f", sum/count; else print 0}' "$csv_file")
+    avg_loss=$(awk -F',' 'NR>1 && $2=="udp" {sum+=$7; count++} END {if(count>0) printf "%.4f", sum/count; else print 0}' "$csv_file")
+    avg_jitter=$(awk -F',' 'NR>1 && $2=="udp" {sum+=$8; count++} END {if(count>0) printf "%.4f", sum/count; else print 0}' "$csv_file")
+
+    # 写入HTML
+    cat > "$html_file" << EOF
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>网络测试报告 - ${run_id}</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+body { font-family: Arial, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #f5f7fa; }
+h1,h2 { color: #2c3e50; }
+.card { background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+.stats { display: flex; gap: 20px; flex-wrap: wrap; }
+.stat-item { flex: 1; min-width: 150px; padding: 15px; border-radius: 6px; background: #f0f4f8; }
+.stat-label { font-size: 14px; color: #666; margin-bottom: 5px; }
+.stat-value { font-size: 22px; font-weight: bold; color: #2c3e50; }
+table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+th,td { padding: 8px 12px; border: 1px solid #e0e0e0; text-align: center; }
+th { background: #f0f4f8; }
+.chart-container { position: relative; height: 300px; margin: 20px 0; }
+</style>
+</head>
+<body>
+<h1>多端口网络稳定性测试报告</h1>
+<div class="card">
+  <h2>基本信息</h2>
+  <p><strong>测试ID:</strong> ${run_id}</p>
+  <p><strong>服务端IP:</strong> ${SERVER_IP:-未知}</p>
+  <p><strong>测试时长:</strong> ${TEST_DURATION}s / 端口</p>
+  <p><strong>端口范围:</strong> ${BASE_PORT} ~ $(( BASE_PORT + PORT_COUNT - 1 ))</p>
+</div>
+
+<div class="card">
+  <h2>整体统计</h2>
+  <div class="stats">
+    <div class="stat-item">
+      <div class="stat-label">TCP平均下行</div>
+      <div class="stat-value">${avg_tcp_rx} Mbps</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-label">TCP平均上行</div>
+      <div class="stat-value">${avg_tcp_tx} Mbps</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-label">UDP平均下行</div>
+      <div class="stat-value">${avg_udp_rx} Mbps</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-label">UDP平均丢包</div>
+      <div class="stat-value">${avg_loss} %</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-label">UDP平均抖动</div>
+      <div class="stat-value">${avg_jitter} ms</div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>TCP 带宽对比</h2>
+  <div class="chart-container"><canvas id="tcpChart"></canvas></div>
+</div>
+
+<div class="card">
+  <h2>UDP 带宽对比</h2>
+  <div class="chart-container"><canvas id="udpChart"></canvas></div>
+</div>
+
+<div class="card">
+  <h2>UDP 丢包与抖动</h2>
+  <div class="chart-container"><canvas id="udpQualityChart"></canvas></div>
+</div>
+
+<div class="card">
+  <h2>详细数据表</h2>
+  <table>
+    <tr><th>模式</th><th>端口</th><th>状态</th><th>下行(Mbps)</th><th>上行(Mbps)</th><th>丢包(%)</th><th>抖动(ms)</th></tr>
+    $(awk -F',' 'NR>1 {
+        printf "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n", toupper($2), $3, $4, $5, $6, $7, $8
+    }' "$csv_file")
+  </table>
+</div>
+
+<script>
+const tcpPorts = [${tcp_ports}];
+const tcpRx = [${tcp_rx}];
+const tcpTx = [${tcp_tx}];
+
+new Chart(document.getElementById('tcpChart'), {
+  type: 'bar',
+  data: {
+    labels: tcpPorts,
+    datasets: [
+      { label: '下行 Mbps', data: tcpRx, backgroundColor: 'rgba(52, 152, 219, 0.7)' },
+      { label: '上行 Mbps', data: tcpTx, backgroundColor: 'rgba(46, 204, 113, 0.7)' }
+    ]
+  },
+  options: { responsive: true, maintainAspectRatio: false }
+});
+
+const udpPorts = [${udp_ports}];
+const udpRx = [${udp_rx}];
+const udpTx = [${udp_tx}];
+
+new Chart(document.getElementById('udpChart'), {
+  type: 'bar',
+  data: {
+    labels: udpPorts,
+    datasets: [
+      { label: '下行 Mbps', data: udpRx, backgroundColor: 'rgba(155, 89, 182, 0.7)' },
+      { label: '上行 Mbps', data: udpTx, backgroundColor: 'rgba(241, 196, 15, 0.7)' }
+    ]
+  },
+  options: { responsive: true, maintainAspectRatio: false }
+});
+
+const udpLoss = [${udp_loss}];
+const udpJitter = [${udp_jitter}];
+
+new Chart(document.getElementById('udpQualityChart'), {
+  type: 'line',
+  data: {
+    labels: udpPorts,
+    datasets: [
+      { label: '丢包率 %', data: udpLoss, borderColor: '#e74c3c', yAxisID: 'y' },
+      { label: '抖动 ms', data: udpJitter, borderColor: '#f39c12', yAxisID: 'y1' }
+    ]
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    scales: {
+      y: { type: 'linear', position: 'left', title: { display: true, text: '丢包率 %' } },
+      y1: { type: 'linear', position: 'right', title: { display: true, text: '抖动 ms' } }
+    }
+  }
+});
+</script>
+</body>
+</html>
+EOF
+
+    echo -e "\n${GREEN}✅ HTML报告已生成: ${html_file}${NC}"
+    echo "浏览器打开即可查看图表，可直接转发用于内核调优分析"
 }
 
 # 执行一轮完整测试
@@ -213,6 +399,7 @@ one_round(){
         ;;
     esac
     print_summary
+    gen_html_report "${SUMMARY_CSV}" "${RUN_ID}"
 }
 
 # 测试主循环
@@ -256,6 +443,7 @@ gen_report(){
 
     echo -e "\n${CYAN}===== 测试报告: ${rid} =====${NC}"
     column -t -s ',' "$csv"
+    gen_html_report "$csv" "$rid"
     echo -e "\n原始文件: $csv"
     read -p "按回车返回主菜单..."
 }
