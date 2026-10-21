@@ -125,7 +125,6 @@ test_single_port(){
 
     while [ $try -le $RETRY_TIMES ];do
         set +e
-        # 修复：移除--logfile，JSON输出到标准输出，错误日志单独保存
         timeout $((TEST_DURATION + 8)) iperf3 -c "${SERVER_IP}" -p "${port}" -t "${TEST_DURATION}" \
             -i 0 -P "${THREAD_PER_PORT}" ${extra_args} -J > "${log_json}" 2>"${log_err}"
         ret=$?
@@ -145,14 +144,12 @@ test_single_port(){
     if [ $ret -eq 124 ];then
         status="timeout"
     elif [ $ret -eq 0 ] && [ -s "${log_json}" ];then
-        # 强校验JSON有效性
         if jq -e '.end.sum_sent and .end.sum_received' "${log_json}" &>/dev/null;then
             status="ok"
             local tx_bps rx_bps
             tx_bps=$(jq -r '.end.sum_sent.bits_per_second // 0' "${log_json}")
             rx_bps=$(jq -r '.end.sum_received.bits_per_second // 0' "${log_json}")
 
-            # 数值校验
             is_number "$tx_bps" || tx_bps=0
             is_number "$rx_bps" || rx_bps=0
 
@@ -185,12 +182,11 @@ run_batch_test(){
     wait "${pids[@]}"
 }
 
-# 输出本轮结果汇总（从CSV读取，按端口排序）
+# 输出本轮结果汇总
 print_summary(){
     echo -e "\n${CYAN}==================== 本轮测试结果 ====================${NC}"
     local ok=0 timeout=0 err=0
 
-    # 统计状态
     while IFS=',' read -r _ _ _ status _ _ _ _; do
         case "$status" in
             ok) ok=$((ok+1)) ;;
@@ -199,14 +195,12 @@ print_summary(){
         esac
     done < <(tail -n +2 "${SUMMARY_CSV}")
 
-    # 列出异常端口（按端口排序）
     echo -e "${YELLOW}----- 异常端口列表 -----${NC}"
     awk -F',' 'NR>1 && $4!="ok" {
         if($4=="timeout") printf "\033[1;33m[超时] %s 端口 %s\033[0m\n", toupper($2), $3
         else printf "\033[0;31m[异常] %s 端口 %s\033[0m\n", toupper($2), $3
     }' "${SUMMARY_CSV}" | sort -t' ' -k3 -n
 
-    # 计算平均带宽
     echo -e "\n${GREEN}----- 带宽统计 -----${NC}"
     local avg_tcp_rx avg_tcp_tx avg_udp_rx avg_udp_tx avg_loss avg_jitter
     avg_tcp_rx=$(awk -F',' 'NR>1 && $2=="tcp" && $4=="ok" {sum+=$5; count++} END {if(count>0) printf "%.2f", sum/count; else print "0.00"}' "${SUMMARY_CSV}")
@@ -229,13 +223,13 @@ print_summary(){
     echo -e "汇总文件: ${SUMMARY_CSV}"
 }
 
-# 生成HTML图表报告
+# 生成HTML图表报告（修复排序报错）
 gen_html_report(){
     local csv_file="$1"
     local run_id="$2"
     local html_file="${LOG_ROOT}/${run_id}/report_${run_id}.html"
 
-    # 提取排序后的数据
+    # 提取排序后的数据（逗号分隔，按端口升序）
     local tcp_data udp_data
     tcp_data=$(awk -F',' 'NR>1 && $2=="tcp" {print $3","$5","$6}' "$csv_file" | sort -t',' -k1 -n)
     udp_data=$(awk -F',' 'NR>1 && $2=="udp" {print $3","$5","$6","$7","$8}' "$csv_file" | sort -t',' -k1 -n)
@@ -261,6 +255,12 @@ gen_html_report(){
     avg_udp_tx=$(awk -F',' 'NR>1 && $2=="udp" && $4=="ok" {sum+=$6; count++} END {if(count>0) printf "%.2f", sum/count; else print 0}' "$csv_file")
     avg_loss=$(awk -F',' 'NR>1 && $2=="udp" && $4=="ok" {sum+=$7; count++} END {if(count>0) printf "%.4f", sum/count; else print 0}' "$csv_file")
     avg_jitter=$(awk -F',' 'NR>1 && $2=="udp" && $4=="ok" {sum+=$8; count++} END {if(count>0) printf "%.4f", sum/count; else print 0}' "$csv_file")
+
+    # 生成排序后的HTML表格行（先按端口排序CSV，再转HTML）
+    local table_rows
+    table_rows=$(tail -n +2 "$csv_file" | sort -t',' -k3 -n | awk -F',' '{
+        printf "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n", toupper($2), $3, $4, $5, $6, $7, $8
+    }')
 
     # 写入HTML
     cat > "$html_file" << EOF
@@ -339,9 +339,7 @@ th { background: #f0f4f8; }
   <h2>详细数据表</h2>
   <table>
     <tr><th>模式</th><th>端口</th><th>状态</th><th>下行(Mbps)</th><th>上行(Mbps)</th><th>丢包(%)</th><th>抖动(ms)</th></tr>
-    $(awk -F',' 'NR>1 {
-        printf "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n", toupper($2), $3, $4, $5, $6, $7, $8
-    }' "$csv_file" | sort -t'</td><td>' -k2 -n)
+    ${table_rows}
   </table>
 </div>
 
