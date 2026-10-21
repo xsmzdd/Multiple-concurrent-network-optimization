@@ -107,13 +107,13 @@ is_number(){
     [[ "$1" =~ ^[0-9]+(\.[0-9]+)?$ ]]
 }
 
-# 单端口测试（带重试，仅写CSV文件，不依赖共享变量）
+# 单端口测试（带重试，仅写CSV文件）
 test_single_port(){
     local port="$1"
     local mode="$2"
     local ret=1
     local try=0
-    local log_raw="${LOG_DIR}/${mode}/port_${port}.log"
+    local log_err="${LOG_DIR}/${mode}/port_${port}.err.log"
     local log_json="${LOG_DIR}/${mode}/port_${port}.json"
     local extra_args=""
 
@@ -125,8 +125,9 @@ test_single_port(){
 
     while [ $try -le $RETRY_TIMES ];do
         set +e
+        # 修复：移除--logfile，JSON输出到标准输出，错误日志单独保存
         timeout $((TEST_DURATION + 8)) iperf3 -c "${SERVER_IP}" -p "${port}" -t "${TEST_DURATION}" \
-            -i 0 -P "${THREAD_PER_PORT}" ${extra_args} -J --logfile "${log_raw}" > "${log_json}" 2>/dev/null
+            -i 0 -P "${THREAD_PER_PORT}" ${extra_args} -J > "${log_json}" 2>"${log_err}"
         ret=$?
         set -e
         if [ $ret -eq 0 ];then break;fi
@@ -143,28 +144,30 @@ test_single_port(){
 
     if [ $ret -eq 124 ];then
         status="timeout"
-    elif [ $ret -eq 0 ] && [ -f "${log_json}" ] && jq -r '.end' "${log_json}" &>/dev/null;then
-        status="ok"
-        local tx_bps rx_bps
-        tx_bps=$(jq -r '.end.sum_sent.bits_per_second // 0' "${log_json}")
-        rx_bps=$(jq -r '.end.sum_receiver.bits_per_second // 0' "${log_json}")
+    elif [ $ret -eq 0 ] && [ -s "${log_json}" ];then
+        # 强校验JSON有效性
+        if jq -e '.end.sum_sent and .end.sum_received' "${log_json}" &>/dev/null;then
+            status="ok"
+            local tx_bps rx_bps
+            tx_bps=$(jq -r '.end.sum_sent.bits_per_second // 0' "${log_json}")
+            rx_bps=$(jq -r '.end.sum_received.bits_per_second // 0' "${log_json}")
 
-        # 数值校验，非数字置0，避免bc报错
-        is_number "$tx_bps" || tx_bps=0
-        is_number "$rx_bps" || rx_bps=0
+            # 数值校验
+            is_number "$tx_bps" || tx_bps=0
+            is_number "$rx_bps" || rx_bps=0
 
-        tx_mbps=$(echo "scale=2; $tx_bps / 1000000" | bc -l)
-        rx_mbps=$(echo "scale=2; $rx_bps / 1000000" | bc -l)
+            tx_mbps=$(echo "scale=2; $tx_bps / 1000000" | bc -l)
+            rx_mbps=$(echo "scale=2; $rx_bps / 1000000" | bc -l)
 
-        if [ "$mode" = "udp" ];then
-            loss_pct=$(jq -r '.end.sum_receiver.loss_percent // 0' "${log_json}")
-            jitter_ms=$(jq -r '.end.sum_receiver.jitter_ms // 0' "${log_json}")
-            is_number "$loss_pct" || loss_pct=0
-            is_number "$jitter_ms" || jitter_ms=0
+            if [ "$mode" = "udp" ];then
+                loss_pct=$(jq -r '.end.sum_received.loss_percent // 0' "${log_json}")
+                jitter_ms=$(jq -r '.end.sum_received.jitter_ms // 0' "${log_json}")
+                is_number "$loss_pct" || loss_pct=0
+                is_number "$jitter_ms" || jitter_ms=0
+            fi
         fi
     fi
 
-    # 仅写入CSV，不依赖全局数组
     echo "${RUN_ID},${mode},${port},${status},${rx_mbps},${tx_mbps},${loss_pct},${jitter_ms}" >> "${SUMMARY_CSV}"
 }
 
@@ -182,12 +185,12 @@ run_batch_test(){
     wait "${pids[@]}"
 }
 
-# 输出本轮结果汇总（从CSV读取，修复并行变量不共享问题）
+# 输出本轮结果汇总（从CSV读取，按端口排序）
 print_summary(){
     echo -e "\n${CYAN}==================== 本轮测试结果 ====================${NC}"
     local ok=0 timeout=0 err=0
 
-    # 从CSV统计状态
+    # 统计状态
     while IFS=',' read -r _ _ _ status _ _ _ _; do
         case "$status" in
             ok) ok=$((ok+1)) ;;
@@ -196,11 +199,30 @@ print_summary(){
         esac
     done < <(tail -n +2 "${SUMMARY_CSV}")
 
-    # 列出异常端口
+    # 列出异常端口（按端口排序）
+    echo -e "${YELLOW}----- 异常端口列表 -----${NC}"
     awk -F',' 'NR>1 && $4!="ok" {
         if($4=="timeout") printf "\033[1;33m[超时] %s 端口 %s\033[0m\n", toupper($2), $3
         else printf "\033[0;31m[异常] %s 端口 %s\033[0m\n", toupper($2), $3
-    }' "${SUMMARY_CSV}"
+    }' "${SUMMARY_CSV}" | sort -t' ' -k3 -n
+
+    # 计算平均带宽
+    echo -e "\n${GREEN}----- 带宽统计 -----${NC}"
+    local avg_tcp_rx avg_tcp_tx avg_udp_rx avg_udp_tx avg_loss avg_jitter
+    avg_tcp_rx=$(awk -F',' 'NR>1 && $2=="tcp" && $4=="ok" {sum+=$5; count++} END {if(count>0) printf "%.2f", sum/count; else print "0.00"}' "${SUMMARY_CSV}")
+    avg_tcp_tx=$(awk -F',' 'NR>1 && $2=="tcp" && $4=="ok" {sum+=$6; count++} END {if(count>0) printf "%.2f", sum/count; else print "0.00"}' "${SUMMARY_CSV}")
+    avg_udp_rx=$(awk -F',' 'NR>1 && $2=="udp" && $4=="ok" {sum+=$5; count++} END {if(count>0) printf "%.2f", sum/count; else print "0.00"}' "${SUMMARY_CSV}")
+    avg_udp_tx=$(awk -F',' 'NR>1 && $2=="udp" && $4=="ok" {sum+=$6; count++} END {if(count>0) printf "%.2f", sum/count; else print "0.00"}' "${SUMMARY_CSV}")
+    avg_loss=$(awk -F',' 'NR>1 && $2=="udp" && $4=="ok" {sum+=$7; count++} END {if(count>0) printf "%.4f", sum/count; else print "0.0000"}' "${SUMMARY_CSV}")
+    avg_jitter=$(awk -F',' 'NR>1 && $2=="udp" && $4=="ok" {sum+=$8; count++} END {if(count>0) printf "%.4f", sum/count; else print "0.0000"}' "${SUMMARY_CSV}")
+
+    if [ $SELECT_MODE -eq 1 ] || [ $SELECT_MODE -eq 3 ];then
+        echo -e "TCP 平均下行: ${CYAN}${avg_tcp_rx} Mbps${NC}  |  TCP 平均上行: ${CYAN}${avg_tcp_tx} Mbps${NC}"
+    fi
+    if [ $SELECT_MODE -eq 2 ] || [ $SELECT_MODE -eq 3 ];then
+        echo -e "UDP 平均下行: ${CYAN}${avg_udp_rx} Mbps${NC}  |  UDP 平均上行: ${CYAN}${avg_udp_tx} Mbps${NC}"
+        echo -e "UDP 平均丢包: ${CYAN}${avg_loss}%${NC}  |  UDP 平均抖动: ${CYAN}${avg_jitter}ms${NC}"
+    fi
 
     echo -e "\n${GREEN}✅ 正常: $ok  | ${YELLOW}⏱️ 超时: $timeout | ${RED}❌ 异常: $err${NC}"
     echo -e "日志目录: ${LOG_DIR}"
@@ -213,10 +235,10 @@ gen_html_report(){
     local run_id="$2"
     local html_file="${LOG_ROOT}/${run_id}/report_${run_id}.html"
 
-    # 提取TCP和UDP数据
+    # 提取排序后的数据
     local tcp_data udp_data
-    tcp_data=$(awk -F',' 'NR>1 && $2=="tcp" {print $3","$5","$6}' "$csv_file")
-    udp_data=$(awk -F',' 'NR>1 && $2=="udp" {print $3","$5","$6","$7","$8}' "$csv_file")
+    tcp_data=$(awk -F',' 'NR>1 && $2=="tcp" {print $3","$5","$6}' "$csv_file" | sort -t',' -k1 -n)
+    udp_data=$(awk -F',' 'NR>1 && $2=="udp" {print $3","$5","$6","$7","$8}' "$csv_file" | sort -t',' -k1 -n)
 
     # 生成JS数组格式
     local tcp_ports tcp_rx tcp_tx
@@ -233,12 +255,12 @@ gen_html_report(){
 
     # 计算平均值
     local avg_tcp_rx avg_tcp_tx avg_udp_rx avg_udp_tx avg_loss avg_jitter
-    avg_tcp_rx=$(awk -F',' 'NR>1 && $2=="tcp" {sum+=$5; count++} END {if(count>0) printf "%.2f", sum/count; else print 0}' "$csv_file")
-    avg_tcp_tx=$(awk -F',' 'NR>1 && $2=="tcp" {sum+=$6; count++} END {if(count>0) printf "%.2f", sum/count; else print 0}' "$csv_file")
-    avg_udp_rx=$(awk -F',' 'NR>1 && $2=="udp" {sum+=$5; count++} END {if(count>0) printf "%.2f", sum/count; else print 0}' "$csv_file")
-    avg_udp_tx=$(awk -F',' 'NR>1 && $2=="udp" {sum+=$6; count++} END {if(count>0) printf "%.2f", sum/count; else print 0}' "$csv_file")
-    avg_loss=$(awk -F',' 'NR>1 && $2=="udp" {sum+=$7; count++} END {if(count>0) printf "%.4f", sum/count; else print 0}' "$csv_file")
-    avg_jitter=$(awk -F',' 'NR>1 && $2=="udp" {sum+=$8; count++} END {if(count>0) printf "%.4f", sum/count; else print 0}' "$csv_file")
+    avg_tcp_rx=$(awk -F',' 'NR>1 && $2=="tcp" && $4=="ok" {sum+=$5; count++} END {if(count>0) printf "%.2f", sum/count; else print 0}' "$csv_file")
+    avg_tcp_tx=$(awk -F',' 'NR>1 && $2=="tcp" && $4=="ok" {sum+=$6; count++} END {if(count>0) printf "%.2f", sum/count; else print 0}' "$csv_file")
+    avg_udp_rx=$(awk -F',' 'NR>1 && $2=="udp" && $4=="ok" {sum+=$5; count++} END {if(count>0) printf "%.2f", sum/count; else print 0}' "$csv_file")
+    avg_udp_tx=$(awk -F',' 'NR>1 && $2=="udp" && $4=="ok" {sum+=$6; count++} END {if(count>0) printf "%.2f", sum/count; else print 0}' "$csv_file")
+    avg_loss=$(awk -F',' 'NR>1 && $2=="udp" && $4=="ok" {sum+=$7; count++} END {if(count>0) printf "%.4f", sum/count; else print 0}' "$csv_file")
+    avg_jitter=$(awk -F',' 'NR>1 && $2=="udp" && $4=="ok" {sum+=$8; count++} END {if(count>0) printf "%.4f", sum/count; else print 0}' "$csv_file")
 
     # 写入HTML
     cat > "$html_file" << EOF
@@ -319,7 +341,7 @@ th { background: #f0f4f8; }
     <tr><th>模式</th><th>端口</th><th>状态</th><th>下行(Mbps)</th><th>上行(Mbps)</th><th>丢包(%)</th><th>抖动(ms)</th></tr>
     $(awk -F',' 'NR>1 {
         printf "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>\n", toupper($2), $3, $4, $5, $6, $7, $8
-    }' "$csv_file")
+    }' "$csv_file" | sort -t'</td><td>' -k2 -n)
   </table>
 </div>
 
@@ -383,7 +405,7 @@ new Chart(document.getElementById('udpQualityChart'), {
 EOF
 
     echo -e "\n${GREEN}✅ HTML报告已生成: ${html_file}${NC}"
-    echo "浏览器打开即可查看图表，可直接转发用于内核调优分析"
+    echo "浏览器打开即可查看图表，数据可直接用于内核调优分析"
 }
 
 # 执行一轮完整测试
@@ -442,7 +464,7 @@ gen_report(){
     fi
 
     echo -e "\n${CYAN}===== 测试报告: ${rid} =====${NC}"
-    column -t -s ',' "$csv"
+    column -t -s ',' "$csv" | sort -t',' -k3 -n
     gen_html_report "$csv" "$rid"
     echo -e "\n原始文件: $csv"
     read -p "按回车返回主菜单..."
